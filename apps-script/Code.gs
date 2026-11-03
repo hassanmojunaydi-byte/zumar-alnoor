@@ -49,6 +49,9 @@ function handle_(req) {
     if (a === 'tasmee') return tasmee_(me, p);
     if (a === 'accounts') return accounts_(me, p);
     if (a === 'notify') return notifyCommittee_(me, p.date);
+    if (a === 'photos') return photos_(me);
+    if (a === 'photo') return setPhoto_(me, p);
+    if (a === 'importPhotos') return importPhotos_(me);
     return {ok: false, error: 'unknown_action'};
   } catch (err) {
     return {ok: false, error: String(err && err.message || err)};
@@ -285,7 +288,7 @@ function boot_(me, p) {
     if (tid && tid === athAdmin) { data.athar = db.athar || {}; data.athar_log = db.athar_log || {}; }
     data.tasmee = {}; Object.keys(db.tasmee || {}).forEach(function (id) { if (myIds.indexOf(id.split('_')[0]) >= 0) data.tasmee[id] = db.tasmee[id]; });
   }
-  var out = {me: pub, data: data, link: appUrl_(), serverTime: new Date().toISOString()};
+  var out = {me: pub, data: data, link: appUrl_(), serverTime: new Date().toISOString(), photosVer: prop_('PHOTOS_VER') || '0'};
   if (me.role === 'system') out.accounts = readAccounts_();
   var etag = Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify(out.data) + JSON.stringify(out.me) + (out.accounts ? JSON.stringify(out.accounts) : '')));
   if (p.etag && p.etag === etag) return ok_({same: true, etag: etag});
@@ -365,6 +368,66 @@ function tasmee_(me, p) {
   return ok_({file: readFile_({id: p.fid, file_id: meta.file_id, halaqa: meta.halaqa, stage: meta.stage, order: meta.order}, true)});
 }
 
+/* ================= TEACHER PHOTOS ================= */
+/* الصور تُحفظ في مجلد «صور المعلمين» بجانب قاعدة البيانات، وتسجَّل في _db كرقم ملف فقط */
+function photoFolder_() {
+  var props = PropertiesService.getScriptProperties(), id = props.getProperty('PHOTO_FOLDER');
+  if (id) { try { var f = DriveApp.getFolderById(id); if (!f.isTrashed()) return f; } catch (e) {} }
+  var master = DriveApp.getFileById(CFG.MASTER_ID), parents = master.getParents();
+  var parent = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
+  var ex = parent.getFoldersByName('صور المعلمين'), folder = ex.hasNext() ? ex.next() : parent.createFolder('صور المعلمين');
+  props.setProperty('PHOTO_FOLDER', folder.getId());
+  return folder;
+}
+function setDoc_(coll, id, doc, by) {
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var store = readDb_(), row = store.idx[coll + '|' + id], sh = store.sh, stamp = new Date().toISOString();
+    if (!doc) { if (row) sh.deleteRow(row); }
+    else if (row) sh.getRange(row, 3, 1, 3).setValues([[JSON.stringify(doc), stamp, by || '']]);
+    else sh.appendRow([coll, id, JSON.stringify(doc), stamp, by || '']);
+    SpreadsheetApp.flush();
+  } finally { lock.releaseLock(); }
+}
+function bumpPhotos_() { PropertiesService.getScriptProperties().setProperty('PHOTOS_VER', String(Date.now())); }
+function photoSrc_(fileId) {
+  var c = CacheService.getScriptCache(), k = 'ph_' + fileId, hit = c.get(k); if (hit) return hit;
+  var f = DriveApp.getFileById(fileId), blob = f.getSize() <= 70000 ? f.getBlob() : f.getThumbnail();
+  if (!blob) return null;
+  var src = 'data:' + (blob.getContentType() || 'image/jpeg') + ';base64,' + Utilities.base64Encode(blob.getBytes());
+  try { c.put(k, src, 21600); } catch (e) {}
+  return src;
+}
+function photos_(me) {
+  var db = readDb_().db, all = db.photos || {}, out = {}, ids = Object.keys(all);
+  if (me.role !== 'system' && me.role !== 'admin') { var tid = tidOf_(db, me.tname); ids = tid && all[tid] ? [tid] : []; }
+  ids.forEach(function (k) { try { var s = photoSrc_(all[k].file); if (s) out[k] = s; } catch (e) {} });
+  return ok_({photos: out, ver: prop_('PHOTOS_VER') || '0'});
+}
+function setPhoto_(me, p) {
+  if (me.role !== 'system' && me.role !== 'admin') return {ok: false, error: 'forbidden'};
+  var db = readDb_().db, t = (db.teachers || {})[p.tid]; if (!t) return {ok: false, error: 'المعلم غير موجود'};
+  if (!p.src) { setDoc_('photos', p.tid, null, me.email); bumpPhotos_(); return ok_({}); }
+  if (String(p.src).indexOf('data:image/') !== 0 || p.src.length > 400000) return {ok: false, error: 'الصورة كبيرة أو غير صالحة'};
+  var parts = p.src.split(','), type = parts[0].replace('data:', '').replace(';base64', '');
+  var file = photoFolder_().createFile(Utilities.newBlob(Utilities.base64Decode(parts[1]), type, t.name + '.jpg'));
+  setDoc_('photos', p.tid, {file: file.getId(), from: 'upload', at: new Date().toISOString()}, me.email);
+  bumpPhotos_(); return ok_({});
+}
+function importPhotos_(me) {
+  if (me.role !== 'system' && me.role !== 'admin') return {ok: false, error: 'forbidden'};
+  var db = readDb_().db, folder = photoFolder_(), files = folder.getFiles(), matched = [], unmatched = [], best = {};
+  while (files.hasNext()) {
+    var f = files.next(); if (String(f.getMimeType()).indexOf('image/') !== 0) continue;
+    var tid = tidOf_(db, f.getName().replace(/\.[^.]+$/, '').replace(/^أ\.?\s*/, ''));
+    if (!tid) { unmatched.push(f.getName()); continue; }
+    if (!best[tid] || f.getLastUpdated() > best[tid].getLastUpdated()) best[tid] = f; // الأحدث لكل معلم
+  }
+  Object.keys(best).forEach(function (tid) { setDoc_('photos', tid, {file: best[tid].getId(), from: 'folder', at: new Date().toISOString()}, me.email); matched.push(db.teachers[tid].name); });
+  bumpPhotos_();
+  return ok_({matched: matched, unmatched: unmatched, folderUrl: folder.getUrl()});
+}
+
 /* ================= READABLE REPORT TABS ================= */
 function writeTab_(name, rows) {
   var ss = master_(), sh = ss.getSheetByName(name) || ss.insertSheet(name);
@@ -429,6 +492,7 @@ function setup() {
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === 'eveningDigest') ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('eveningDigest').timeBased().atHour(21).everyDays(1).inTimezone('Asia/Riyadh').create();
   importSeed_();
+  try { photoFolder_(); } catch (e) { Logger.log('مجلد الصور: ' + e); }
   var n = dbSheet_().getLastRow() - 1;
   Logger.log('تم الإعداد. عدد السجلات في قاعدة البيانات: ' + n);
   // سطر للتأكد من صلاحيات البريد والتطبيق
