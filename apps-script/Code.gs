@@ -584,3 +584,17 @@ function authorizeDrive() {
   Logger.log('صلاحية الدرايف مفعّلة: ' + DriveApp.getRootFolder().getName());
   Logger.log('مجلد الصور: ' + photoFolder_().getUrl());
 }
+
+/** تشغيل مرة واحدة: إسناد طلاب العليا إلى حلقتيهم الرسميتين حسب ملفات التحضير */
+function fixUlya() {
+  var map = {'كعب بن مالك': ["s001", "s008", "s009", "s014", "s022", "s023", "s043", "s048", "s051", "s052", "s053", "s058", "s063", "s065", "s067", "s069", "s077", "s079", "s094", "s164", "s167", "s168", "s169", "s171", "s184", "s188", "s192", "s193", "s203"], 'عثمان بن عفان': ["s002", "s004", "s033", "s035", "s041", "s042", "s044", "s056", "s076", "s081", "s085", "s086", "s087", "s092", "s095", "s096", "s097", "s099", "s102", "s138", "s161", "s165", "s166", "s172", "s199", "s208"]};
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var store = readDb_(), sh = store.sh, n = 0;
+    Object.keys(map).forEach(function (h) { map[h].forEach(function (id) {
+      var row = store.idx['students|' + id], doc = (store.db.students || {})[id]; if (!row || !doc || doc.halaqa) return;
+      doc.halaqa = h; sh.getRange(row, 3, 1, 3).setValues([[JSON.stringify(doc), new Date().toISOString(), 'fixUlya']]); n++; }); });
+    SpreadsheetApp.flush(); try { report_('students', readDb_().db); } catch (e) {}
+    Logger.log('تم إسناد ' + n + ' طالباً');
+  } finally { lock.releaseLock(); }
+}
