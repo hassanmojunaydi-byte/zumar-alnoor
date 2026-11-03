@@ -8,7 +8,8 @@ var CFG = {
   OWNERS: ['hassan.mo.junaydi@gmail.com'],
   APP: 'حلقات زمر النور',
   GRID_TTL: 90,          // ثوانٍ: مدة الاحتفاظ بقراءة ملف التحضير
-  SESSION_DAYS: 60
+  SESSION_DAYS: 60,
+  TEACHER_FILES_FOLDER: '1aXXMQs45LlfPPXtDO6gtSYkQorhPXNsw' // «صور وملفات المعلمين»
 };
 var ROLE_AR = {system:'النظام', admin:'الإدارة', exams:'لجنة الاختبارات', teacher:'معلم'};
 var ROLE_EN = {'النظام':'system','الإدارة':'admin','لجنة الاختبارات':'exams','معلم':'teacher'};
@@ -428,14 +429,26 @@ function setPhoto_(me, p) {
 }
 function importPhotos_(me) {
   if (me.role !== 'system' && me.role !== 'admin') return {ok: false, error: 'forbidden'};
-  var db = readDb_().db, folder = photoFolder_(), files = folder.getFiles(), matched = [], unmatched = [], best = {};
-  while (files.hasNext()) {
-    var f = files.next(); if (String(f.getMimeType()).indexOf('image/') !== 0) continue;
-    var tid = tidOf_(db, f.getName().replace(/\.[^.]+$/, '').replace(/^أ\.?\s*/, ''));
-    if (!tid) { unmatched.push(f.getName()); continue; }
-    if (!best[tid] || f.getLastUpdated() > best[tid].getLastUpdated()) best[tid] = f; // الأحدث لكل معلم
-  }
-  Object.keys(best).forEach(function (tid) { setDoc_('photos', tid, {file: best[tid].getId(), from: 'folder', at: new Date().toISOString()}, me.email); matched.push(db.teachers[tid].name); });
+  var db = readDb_().db, best = {}, unmatched = [];
+  var isFace = function (f) { var n = f.getName(), m = String(f.getMimeType()); return m.indexOf('image/') === 0 && /صورة\s*شخصي|شخصية|personal|photo/i.test(n) && !/هوية|بطاقة|إقامة|اقامة/.test(n); };
+  var consider = function (tid, f) { if (!tid) return; if (!best[tid] || f.getLastUpdated() > best[tid].getLastUpdated()) best[tid] = f; };
+  // 1) مجلد «صور وملفات المعلمين»: مجلد لكل معلم، فيه ملف «صورة شخصية …»
+  var walk = function (folder, depth) {
+    var tidF = tidOf_(db, folder.getName().replace(/^\d+\s*/, ''));
+    var files = folder.getFiles();
+    while (files.hasNext()) { var f = files.next(); if (!isFace(f)) continue;
+      var t = tidF || tidOf_(db, f.getName().replace(/\.[^.]+$/, '').replace(/صورة\s*شخصية\s*[-–]?\s*/, '').replace(/\(\d+\)/, '').trim());
+      if (t) consider(t, f); else unmatched.push(f.getName()); }
+    if (depth < 2) { var subs = folder.getFolders(); while (subs.hasNext()) walk(subs.next(), depth + 1); }
+  };
+  try { walk(DriveApp.getFolderById(CFG.TEACHER_FILES_FOLDER), 0); } catch (e) { unmatched.push('تعذّر فتح مجلد «صور وملفات المعلمين»'); }
+  // 2) مجلد «صور المعلمين» الخاص بالمنصة: صور مسمّاة باسم المعلم
+  var folder = photoFolder_(), fs = folder.getFiles();
+  while (fs.hasNext()) { var g = fs.next(); if (String(g.getMimeType()).indexOf('image/') !== 0) continue;
+    var tg = tidOf_(db, g.getName().replace(/\.[^.]+$/, '').replace(/^أ\.?\s*/, '')); if (tg) consider(tg, g); else unmatched.push(g.getName()); }
+  var matched = [];
+  Object.keys(best).forEach(function (tid) { var cur = (db.photos || {})[tid]; if (cur && cur.from === 'upload') return; // لا نستبدل صورة رُفعت يدوياً
+    setDoc_('photos', tid, {file: best[tid].getId(), from: 'drive', at: new Date().toISOString()}, me.email); matched.push(db.teachers[tid].name); });
   bumpPhotos_();
   return ok_({matched: matched, unmatched: unmatched, folderUrl: folder.getUrl()});
 }
