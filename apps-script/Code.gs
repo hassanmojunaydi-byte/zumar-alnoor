@@ -185,12 +185,18 @@ function claim_(me, p) {
   try {
     var sh = accSheet_(), acc = findAccount_(me.email);
     var role = p.want === 'admin' ? 'الإدارة' : p.want === 'exams' ? 'لجنة الاختبارات' : 'معلم';
-    var row = [me.email, p.name || canon_(p.tname) || '', role, canon_(p.tname) || '', 'بانتظار الاعتماد', Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'), '', ''];
+    var auto = false;
+    if (p.want !== 'admin' && p.want !== 'exams' && p.tname) {
+      var dbA = readDb_().db, tA = (dbA.teachers || {})[tidOf_(dbA, p.tname)] || {};
+      auto = (tA.email && String(tA.email).toLowerCase() === me.email) || (tA.phone && phoneKey_(tA.phone) && phoneKey_(tA.phone) === phoneKey_(p.phone));
+    }
+    var row = [me.email, p.name || canon_(p.tname) || '', role, canon_(p.tname) || '', auto ? 'مفعّل' : 'بانتظار الاعتماد', Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'), '', ''];
     if (acc) sh.getRange(acc.row, 1, 1, 6).setValues([row.slice(0, 6)]); else sh.appendRow(row);
     if (p.phone) { var a2 = findAccount_(me.email); if (a2) sh.getRange(a2.row, 9).setValue(String(p.phone)); }
   } finally { lock.releaseLock(); }
   if (p.photo && p.tname) { try { var db0 = readDb_().db, tid0 = tidOf_(db0, p.tname); if (tid0) savePhoto_(tid0, p.photo, db0.teachers[tid0].name, me.email, 'self'); } catch (e) {} }
   var link = appUrl_();
+  if (auto) return ok_({auto: true});
   CFG.OWNERS.forEach(function (o) {
     MailApp.sendEmail({to: o, subject: 'طلب انضمام جديد إلى ' + CFG.APP, name: CFG.APP,
       htmlBody: mail_('طلب انضمام جديد', '<p><b>' + esc_(p.name || canon_(p.tname) || me.email) + '</b> (' + esc_(me.email) + ') يطلب الدخول بصفة <b>' + esc_(p.want === 'admin' ? 'الإدارة' : p.want === 'exams' ? 'لجنة الاختبارات' : 'معلم') + '</b>.</p><p>اعتمده من: النظام ← بوابة الحسابات.</p>' + btn_(link, 'فتح المنصة'))});
@@ -209,6 +215,13 @@ function accounts_(me, p) {
       var target = acc || (p.row ? {row: +p.row} : null);
       if (target) sh.getRange(target.row, 1, 1, row.length).setValues([row]); else sh.appendRow(row);
       if (email && (p.op === 'invite' || (acc && acc.status !== 'مفعّل' && row[4] === 'مفعّل'))) mailTo = {email: email, name: p.name || p.tname || '', role: row[2]};
+    } else if (p.op === 'quick') {
+      var have = readAccounts_(), stamp = Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm');
+      (p.list || []).forEach(function (t) {
+        var em = String(t.email || '').trim().toLowerCase(), tn = canon_(t.tname);
+        if (have.some(function (a) { return (em && a.email === em) || (tn && a.tname === tn); })) return;
+        sh.appendRow([em, t.name || tn, ROLE_AR[t.role] || 'معلم', tn, em ? 'مفعّل' : 'بانتظار البريد', stamp, '', 'دعوة سريعة', String(t.phone || '')]);
+      });
     } else if (p.op === 'revoke' && acc) {
       sh.getRange(acc.row, 5).setValue('موقوف');
     } else if (p.op === 'delete' && (acc || p.row)) {
