@@ -278,7 +278,10 @@ function pickSheet_(ss, fid) {
   var best = null;
   ss.getSheets().forEach(function (s) {
     if (s.getMaxColumns() < 60) return;
-    var raw = s.getRange('BA3').getDisplayValue(), m = /(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/.exec(raw); if (!m) return;
+    // «تاريخ أول أحد في الشهر» في الصف الثالث (الخلية AY3 في الكشف الحالي)؛ نبحث في الصف كله احتياطاً
+    var row3 = s.getRange(3, 1, 1, Math.min(s.getMaxColumns(), 75)).getDisplayValues()[0], m = null;
+    for (var ci = row3.length - 1; ci >= 0 && !m; ci--) m = /(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/.exec(String(row3[ci]).replace(/[\u200e\u200f]/g, ''));
+    if (!m) return;
     var ds = m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
     if (ds <= today_() && (!best || ds > best.fs)) best = {sheet: s, fs: ds};
   });
@@ -292,7 +295,7 @@ function readFile_(meta, force) {
   try {
     var ss = SpreadsheetApp.openById(meta.file_id), sel = pickSheet_(ss, meta.id);
     if (sel) {
-      var g = sel.sheet.getRange('A1:AW60').getDisplayValues(), last = 7;
+      var g = sel.sheet.getRange(1, 1, Math.min(60, sel.sheet.getMaxRows()), Math.min(49, sel.sheet.getMaxColumns())).getDisplayValues(), last = 7;
       while (last < g.length && String(g[last][2] || '').trim()) last++;
       var grid = g.slice(0, last);
       out.grid = grid; out.sheet = sel.sheet.getName(); out.first_sunday = sel.fs;
@@ -416,7 +419,7 @@ function tasmee_(me, p) {
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
     var ss = SpreadsheetApp.openById(meta.file_id), sh = ss.getSheetByName(f.sheet);
-    var names = sh.getRange(8, 3, 53, 1).getDisplayValues().map(function (r) { return String(r[0]).trim(); });
+    var names = sh.getRange(8, 3, Math.max(1, sh.getMaxRows() - 7), 1).getDisplayValues().map(function (r) { return String(r[0]).trim(); });
     var i = names.indexOf(String(p.name).trim()); if (i < 0) return {ok: false, error: 'لم أجد الطالب في ملف التحضير'};
     sh.getRange(8 + i, col).setValue(p.value || '');
     SpreadsheetApp.flush();
