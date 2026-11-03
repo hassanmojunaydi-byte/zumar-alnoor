@@ -96,7 +96,19 @@ function auth_(token) {
   var role = isOwner ? 'system' : (acc && acc.status === 'مفعّل' ? acc.role : '');
   return {email: email, owner: isOwner, role: role, active: !!role, tname: acc ? acc.tname : '', name: acc ? acc.name : '', status: acc ? acc.status : (isOwner ? 'مفعّل' : ''), account: acc};
 }
+/* تنظيف الجلسات: حذف المنتهية، والإبقاء على آخر 5 أجهزة لكل بريد */
+function purgeSessions_() {
+  var ps = PropertiesService.getScriptProperties(), all = ps.getProperties(), now = Date.now(), byEmail = {};
+  Object.keys(all).forEach(function (k) {
+    if (k.indexOf('s_') !== 0) return;
+    var s; try { s = JSON.parse(all[k]); } catch (e) { ps.deleteProperty(k); return; }
+    if (!s || s.exp < now) { ps.deleteProperty(k); return; }
+    (byEmail[s.email] = byEmail[s.email] || []).push({k: k, exp: s.exp});
+  });
+  Object.keys(byEmail).forEach(function (e) { byEmail[e].sort(function (a, b) { return b.exp - a.exp; }).slice(5).forEach(function (x) { ps.deleteProperty(x.k); }); });
+}
 function newSession_(email) {
+  try { purgeSessions_(); } catch (e) {}
   var token = Utilities.getUuid() + Utilities.getUuid().slice(0, 8);
   PropertiesService.getScriptProperties().setProperty('s_' + token, JSON.stringify({email: email, exp: Date.now() + CFG.SESSION_DAYS * 864e5}));
   var acc = findAccount_(email);
