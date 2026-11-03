@@ -523,3 +523,9 @@ function setup() {
   // سطر للتأكد من صلاحيات البريد والتطبيق
   if (false) { UrlFetchApp.fetch('https://www.google.com'); MailApp.getRemainingDailyQuota(); }
 }
+
+/** تشغيل مرة واحدة لمنح صلاحية الدرايف وإنشاء مجلد «صور المعلمين» */
+function authorizeDrive() {
+  Logger.log('صلاحية الدرايف مفعّلة: ' + DriveApp.getRootFolder().getName());
+  Logger.log('مجلد الصور: ' + photoFolder_().getUrl());
+}
