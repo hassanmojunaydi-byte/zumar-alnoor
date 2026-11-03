@@ -13,7 +13,7 @@ var CFG = {
 };
 var ROLE_AR = {system:'النظام', admin:'الإدارة', exams:'لجنة الاختبارات', teacher:'معلم'};
 var ROLE_EN = {'النظام':'system','الإدارة':'admin','لجنة الاختبارات':'exams','معلم':'teacher'};
-var ACC_HEAD = ['البريد','الاسم','الدور','اسم المعلم في الكشوف','الحالة','تاريخ الطلب','آخر دخول','ملاحظات'];
+var ACC_HEAD = ['البريد','الاسم','الدور','اسم المعلم في الكشوف','الحالة','تاريخ الطلب','آخر دخول','ملاحظات','الجوال'];
 
 /* ================= HTTP ================= */
 function doGet(e) {
@@ -37,14 +37,16 @@ function handle_(req) {
   try {
     var a = req.action, p = req.payload || {};
     if (a === 'public') return ok_({app: CFG.APP, clientId: prop_('GOOGLE_CLIENT_ID') || ''});
-    if (a === 'code') return sendCode_(p.email);
-    if (a === 'verify') return verifyCode_(p.email, p.code);
+    if (a === 'code') return sendCode_(p.email, p.phone);
+    if (a === 'resume') return resume_(p.device);
+    if (a === 'verify') return verifyCode_(p.email, p.code, p.phone);
     if (a === 'google') return googleLogin_(p.credential);
     var me = auth_(req.token);
     if (!me) return {ok: false, error: 'auth'};
     if (a === 'logout') { PropertiesService.getScriptProperties().deleteProperty('s_' + req.token); return ok_({}); }
     if (a === 'boot') return boot_(me, p);
     if (a === 'claim') return claim_(me, p);
+    if (a === 'device') return device_(me, p);
     if (!me.active) return {ok: false, error: 'pending'};
     if (a === 'write') return write_(me, p);
     if (a === 'tasmee') return tasmee_(me, p);
@@ -63,7 +65,7 @@ function prop_(k) { return PropertiesService.getScriptProperties().getProperty(k
 function norm_(s) { return String(s || '').replace(/^أ\.\s*/, '').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').replace(/\s+/g, '').toLowerCase(); }
 function tokens_(s) { return String(s || '').replace(/^أ\.\s*/, '').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').trim().split(/\s+/); }
 var TALIAS = {'حسن زكريا': 'حسن جنيدي', 'حسن زكريا جنيدي': 'حسن جنيدي'};
-function canon_(n) { n = String(n || '').replace(/^أ\.\s*/, '').trim(); return TALIAS[n] || n; }
+function canon_(n) { n = String(n || '').replace(/^(أ\.|الشيخ|الأستاذ|د\.)\s*/, '').trim(); return TALIAS[n] || n; }
 function today_() { return Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd'); }
 function addDays_(d, n) { var x = new Date(d + 'T12:00:00+03:00'); x.setDate(x.getDate() + n); return Utilities.formatDate(x, 'Asia/Riyadh', 'yyyy-MM-dd'); }
 function dow_(d) { return new Date(d + 'T12:00:00+03:00').getDay(); }
@@ -77,14 +79,26 @@ function accSheet_() {
     sh = ss.insertSheet('الحسابات'); sh.setRightToLeft(true);
     sh.getRange(1, 1, 1, ACC_HEAD.length).setValues([ACC_HEAD]).setFontWeight('bold'); sh.setFrozenRows(1);
   }
+  if (sh.getLastColumn() < ACC_HEAD.length) sh.getRange(1, 1, 1, ACC_HEAD.length).setValues([ACC_HEAD]).setFontWeight('bold');
   return sh;
 }
+function phoneKey_(p) { var d = String(p || '').replace(/[٠-٩]/g, function (c) { return '٠١٢٣٤٥٦٧٨٩'.indexOf(c); }).replace(/\D/g, ''); return d.length >= 9 ? d.slice(-9) : ''; }
+/* البحث عن حساب برقم الجوال: من عمود «الجوال» في الحسابات، أو من رقم المعلم المحفوظ في بياناته */
+function findAccountByPhone_(phone) {
+  var k = phoneKey_(phone); if (!k) return null;
+  var all = readAccounts_(), db = null;
+  for (var i = 0; i < all.length; i++) if (all[i].email && phoneKey_(all[i].phone) === k) return all[i];
+  db = readDb_().db;
+  for (var j = 0; j < all.length; j++) { var a = all[j]; if (!a.email || !a.tname) continue; var tid = tidOf_(db, a.tname); if (tid && phoneKey_((db.teachers[tid] || {}).phone) === k) return a; }
+  return null;
+}
+function maskEmail_(e) { var p = String(e).split('@'); return p[0].slice(0, 2) + '•••' + p[0].slice(-1) + '@' + p[1]; }
 function readAccounts_() {
   var v = accSheet_().getDataRange().getValues(), out = [];
   for (var i = 1; i < v.length; i++) {
     var r = v[i]; if (!r[0] && !r[1]) continue;
     out.push({row: i + 1, email: String(r[0] || '').trim().toLowerCase(), name: String(r[1] || ''), role: ROLE_EN[String(r[2] || '').trim()] || '',
-      tname: canon_(r[3]), status: String(r[4] || ''), requested: r[5] ? String(r[5]) : '', last: r[6] ? String(r[6]) : '', notes: String(r[7] || '')});
+      tname: canon_(r[3]), status: String(r[4] || ''), requested: r[5] ? String(r[5]) : '', last: r[6] ? String(r[6]) : '', notes: String(r[7] || ''), phone: String(r[8] || '')});
   }
   return out;
 }
@@ -101,12 +115,27 @@ function auth_(token) {
 function purgeSessions_() {
   var ps = PropertiesService.getScriptProperties(), all = ps.getProperties(), now = Date.now(), byEmail = {};
   Object.keys(all).forEach(function (k) {
-    if (k.indexOf('s_') !== 0) return;
+    if (k.indexOf('s_') !== 0 && k.indexOf('d_') !== 0) return;
     var s; try { s = JSON.parse(all[k]); } catch (e) { ps.deleteProperty(k); return; }
     if (!s || s.exp < now) { ps.deleteProperty(k); return; }
-    (byEmail[s.email] = byEmail[s.email] || []).push({k: k, exp: s.exp});
+    if (k.indexOf('s_') === 0) (byEmail[s.email] = byEmail[s.email] || []).push({k: k, exp: s.exp});
   });
   Object.keys(byEmail).forEach(function (e) { byEmail[e].sort(function (a, b) { return b.exp - a.exp; }).slice(5).forEach(function (x) { ps.deleteProperty(x.k); }); });
+}
+/* «الدخول بالبصمة»: رمز جهاز طويل الأمد يُفتح محلياً ببصمة الجوال ثم يُستبدل بجلسة جديدة */
+function device_(me, p) {
+  var ps = PropertiesService.getScriptProperties();
+  if (p.revoke) { ps.deleteProperty('d_' + p.revoke); return ok_({}); }
+  var t = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '').slice(0, 12);
+  ps.setProperty('d_' + t, JSON.stringify({email: me.email, exp: Date.now() + 180 * 864e5, label: String(p.label || '').slice(0, 60)}));
+  return ok_({device: t});
+}
+function resume_(dev) {
+  if (!dev) return {ok: false, error: 'auth'};
+  var raw = prop_('d_' + dev); if (!raw) return {ok: false, error: 'انتهى تسجيل هذا الجهاز، ادخل بالرمز مرة واحدة'};
+  var d = JSON.parse(raw); if (d.exp < Date.now()) { PropertiesService.getScriptProperties().deleteProperty('d_' + dev); return {ok: false, error: 'انتهى تسجيل هذا الجهاز، ادخل بالرمز مرة واحدة'}; }
+  d.exp = Date.now() + 180 * 864e5; PropertiesService.getScriptProperties().setProperty('d_' + dev, JSON.stringify(d));
+  return ok_({token: newSession_(d.email)});
 }
 function newSession_(email) {
   try { purgeSessions_(); } catch (e) {}
@@ -116,7 +145,9 @@ function newSession_(email) {
   if (acc) accSheet_().getRange(acc.row, 7).setValue(Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'));
   return token;
 }
-function sendCode_(email) {
+function sendCode_(email, phone) {
+  var masked = '';
+  if (phone && !email) { var pa = findAccountByPhone_(phone); if (!pa) return {ok: false, error: 'هذا الرقم غير مسجّل في المنصة. ادخل بالبريد، أو اطلب من الإدارة إضافة رقمك'}; email = pa.email; masked = maskEmail_(email); }
   email = String(email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return {ok: false, error: 'اكتب بريداً صحيحاً'};
   var c = CacheService.getScriptCache(), k = 'otp_' + email, prev = c.get(k);
@@ -127,9 +158,10 @@ function sendCode_(email) {
     htmlBody: mail_('رمز الدخول', '<p style="margin:0 0 12px">استخدم هذا الرمز للدخول إلى منصة ' + CFG.APP + '. صالح لمدة 10 دقائق.</p>' +
       '<div style="font-size:34px;font-weight:800;letter-spacing:8px;background:#f6eedb;color:#6a1820;border-radius:12px;padding:14px;text-align:center;direction:ltr">' + code + '</div>' +
       '<p style="margin:14px 0 0;color:#74645d;font-size:13px">إذا لم تطلب الرمز فتجاهل هذه الرسالة.</p>')});
-  return ok_({});
+  return ok_({sentTo: masked || maskEmail_(email)});
 }
-function verifyCode_(email, code) {
+function verifyCode_(email, code, phone) {
+  if (phone && !email) { var pa = findAccountByPhone_(phone); if (!pa) return {ok: false, error: 'هذا الرقم غير مسجّل'}; email = pa.email; }
   email = String(email || '').trim().toLowerCase();
   var c = CacheService.getScriptCache(), k = 'otp_' + email, raw = c.get(k);
   if (!raw) return {ok: false, error: 'انتهت صلاحية الرمز، اطلب رمزاً جديداً'};
@@ -155,7 +187,9 @@ function claim_(me, p) {
     var role = p.want === 'admin' ? 'الإدارة' : p.want === 'exams' ? 'لجنة الاختبارات' : 'معلم';
     var row = [me.email, p.name || canon_(p.tname) || '', role, canon_(p.tname) || '', 'بانتظار الاعتماد', Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'), '', ''];
     if (acc) sh.getRange(acc.row, 1, 1, 6).setValues([row.slice(0, 6)]); else sh.appendRow(row);
+    if (p.phone) { var a2 = findAccount_(me.email); if (a2) sh.getRange(a2.row, 9).setValue(String(p.phone)); }
   } finally { lock.releaseLock(); }
+  if (p.photo && p.tname) { try { var db0 = readDb_().db, tid0 = tidOf_(db0, p.tname); if (tid0) savePhoto_(tid0, p.photo, db0.teachers[tid0].name, me.email, 'self'); } catch (e) {} }
   var link = appUrl_();
   CFG.OWNERS.forEach(function (o) {
     MailApp.sendEmail({to: o, subject: 'طلب انضمام جديد إلى ' + CFG.APP, name: CFG.APP,
@@ -171,7 +205,7 @@ function accounts_(me, p) {
     var sh = accSheet_(), acc = p.email ? findAccount_(p.email) : null;
     if (p.op === 'invite' || p.op === 'save') {
       var email = String(p.email || '').trim().toLowerCase();
-      var row = [email, p.name || '', ROLE_AR[p.role] || 'معلم', canon_(p.tname) || '', p.status || 'مفعّل', acc ? acc.requested : Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'), acc ? acc.last : '', p.notes || (acc ? acc.notes : '')];
+      var row = [email, p.name || '', ROLE_AR[p.role] || 'معلم', canon_(p.tname) || '', p.status || 'مفعّل', acc ? acc.requested : Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'), acc ? acc.last : '', p.notes || (acc ? acc.notes : ''), p.phone != null ? String(p.phone) : (acc ? acc.phone : '')];
       var target = acc || (p.row ? {row: +p.row} : null);
       if (target) sh.getRange(target.row, 1, 1, row.length).setValues([row]); else sh.appendRow(row);
       if (email && (p.op === 'invite' || (acc && acc.status !== 'مفعّل' && row[4] === 'مفعّل'))) mailTo = {email: email, name: p.name || p.tname || '', role: row[2]};
@@ -301,7 +335,7 @@ function boot_(me, p) {
     if (tid && tid === athAdmin) { data.athar = db.athar || {}; data.athar_log = db.athar_log || {}; }
     data.tasmee = {}; Object.keys(db.tasmee || {}).forEach(function (id) { if (myIds.indexOf(id.split('_')[0]) >= 0) data.tasmee[id] = db.tasmee[id]; });
   }
-  var out = {me: pub, data: data, link: appUrl_(), serverTime: new Date().toISOString(), photosVer: prop_('PHOTOS_VER') || '0'};
+  var out = {me: pub, data: data, link: appUrl_(), serverTime: new Date().toISOString(), photosVer: (prop_('PHOTOS_VER') || '0') + ':' + Object.keys(db.photos || {}).map(function (k) { return k + (db.photos[k].file || '').slice(-4); }).join('')};
   if (me.role === 'system') out.accounts = readAccounts_();
   var etag = Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify(out.data) + JSON.stringify(out.me) + (out.accounts ? JSON.stringify(out.accounts) : '')));
   if (p.etag && p.etag === etag) return ok_({same: true, etag: etag});
@@ -405,7 +439,7 @@ function setDoc_(coll, id, doc, by) {
 function bumpPhotos_() { PropertiesService.getScriptProperties().setProperty('PHOTOS_VER', String(Date.now())); }
 function photoSrc_(fileId) {
   var c = CacheService.getScriptCache(), k = 'ph_' + fileId, hit = c.get(k); if (hit) return hit;
-  var f = DriveApp.getFileById(fileId), blob = f.getSize() <= 70000 ? f.getBlob() : f.getThumbnail();
+  var f = DriveApp.getFileById(fileId), isImg = String(f.getMimeType()).indexOf('image/') === 0, blob = isImg && f.getSize() <= 70000 ? f.getBlob() : f.getThumbnail();
   if (!blob) return null;
   var src = 'data:' + (blob.getContentType() || 'image/jpeg') + ';base64,' + Utilities.base64Encode(blob.getBytes());
   try { c.put(k, src, 21600); } catch (e) {}
@@ -415,17 +449,22 @@ function photos_(me) {
   var db = readDb_().db, all = db.photos || {}, out = {}, ids = Object.keys(all);
   if (me.role !== 'system' && me.role !== 'admin') { var tid = tidOf_(db, me.tname); ids = tid && all[tid] ? [tid] : []; }
   ids.forEach(function (k) { try { var s = photoSrc_(all[k].file); if (s) out[k] = s; } catch (e) {} });
-  return ok_({photos: out, ver: prop_('PHOTOS_VER') || '0'});
+  return ok_({photos: out, ver: (prop_('PHOTOS_VER') || '0') + ':' + Object.keys(all).map(function (k) { return k + (all[k].file || '').slice(-4); }).join('')});
+}
+function savePhoto_(tid, src, name, by, from) {
+  if (String(src).indexOf('data:image/') !== 0 || src.length > 400000) throw new Error('الصورة كبيرة أو غير صالحة');
+  var parts = src.split(','), type = parts[0].replace('data:', '').replace(';base64', '');
+  var file = photoFolder_().createFile(Utilities.newBlob(Utilities.base64Decode(parts[1]), type, name + '.jpg'));
+  setDoc_('photos', tid, {file: file.getId(), from: from || 'upload', at: new Date().toISOString()}, by);
+  bumpPhotos_();
 }
 function setPhoto_(me, p) {
-  if (me.role !== 'system' && me.role !== 'admin') return {ok: false, error: 'forbidden'};
   var db = readDb_().db, t = (db.teachers || {})[p.tid]; if (!t) return {ok: false, error: 'المعلم غير موجود'};
+  var own = me.role === 'teacher' && tidOf_(db, me.tname) === p.tid;
+  if (me.role !== 'system' && me.role !== 'admin' && !own) return {ok: false, error: 'forbidden'};
   if (!p.src) { setDoc_('photos', p.tid, null, me.email); bumpPhotos_(); return ok_({}); }
-  if (String(p.src).indexOf('data:image/') !== 0 || p.src.length > 400000) return {ok: false, error: 'الصورة كبيرة أو غير صالحة'};
-  var parts = p.src.split(','), type = parts[0].replace('data:', '').replace(';base64', '');
-  var file = photoFolder_().createFile(Utilities.newBlob(Utilities.base64Decode(parts[1]), type, t.name + '.jpg'));
-  setDoc_('photos', p.tid, {file: file.getId(), from: 'upload', at: new Date().toISOString()}, me.email);
-  bumpPhotos_(); return ok_({});
+  try { savePhoto_(p.tid, p.src, t.name, me.email, own ? 'self' : 'upload'); } catch (e) { return {ok: false, error: e.message}; }
+  return ok_({});
 }
 function importPhotos_(me) {
   if (me.role !== 'system' && me.role !== 'admin') return {ok: false, error: 'forbidden'};
