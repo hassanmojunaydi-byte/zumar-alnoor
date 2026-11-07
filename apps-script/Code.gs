@@ -9,6 +9,7 @@ var CFG = {
   APP: 'حلقات زمر النور',
   GRID_TTL: 90,          // ثوانٍ: مدة الاحتفاظ بقراءة ملف التحضير
   SESSION_DAYS: 60,
+  REPORT_ID: '1d-0IT6tC2Tg3yoi258IgCs3y0qFm2eek6xp83cBBhiA',
   TEACHER_FILES_FOLDER: '1aXXMQs45LlfPPXtDO6gtSYkQorhPXNsw' // «صور وملفات المعلمين»
 };
 var ROLE_AR = {system:'النظام', admin:'الإدارة', exams:'لجنة الاختبارات', teacher:'معلم'};
@@ -52,6 +53,7 @@ function handle_(req) {
     if (a === 'tasmee') return tasmee_(me, p);
     if (a === 'accounts') return accounts_(me, p);
     if (a === 'notify') return notifyCommittee_(me, p.date);
+    if (a === 'reportSync') return reportSync_(me, p);
     if (a === 'photos') return photos_(me);
     if (a === 'photo') return setPhoto_(me, p);
     if (a === 'importPhotos') return importPhotos_(me);
@@ -509,17 +511,35 @@ function importPhotos_(me) {
 }
 
 /* ================= READABLE REPORT TABS ================= */
-function writeTab_(name, rows) {
-  var ss = master_(), sh = ss.getSheetByName(name) || ss.insertSheet(name);
+/* جدول التقارير في Google Sheets: نسخة من هذه الجداول تُكتب فيه تلقائياً */
+var REPORT_TABS = {'الاختبارات': 'الاختبارات', 'الطلاب المسجلون': 'الطلاب', 'المعلمون': 'المعلمون', 'التحضير اليومي': 'الحضور اليومي', 'برنامج أثر': 'برنامج أثر'};
+function putTab_(ss, name, rows) {
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
   sh.setRightToLeft(true); sh.clearContents();
-  if (rows.length) sh.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  if (!rows.length) return;
+  sh.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
   sh.getRange(1, 1, 1, rows[0].length).setFontWeight('bold'); sh.setFrozenRows(1);
+}
+function writeTab_(name, rows) {
+  putTab_(master_(), name, rows);
+  if (REPORT_TABS[name] && CFG.REPORT_ID) { try { putTab_(SpreadsheetApp.openById(CFG.REPORT_ID), REPORT_TABS[name], rows); } catch (e) {} }
+}
+function hijriStr_(d) { if (!d) return ''; try { return new Intl.DateTimeFormat('ar-SA-u-ca-islamic-umalqura-nu-latn', {day: 'numeric', month: 'long', year: 'numeric'}).format(new Date(d + 'T12:00:00+03:00')); } catch (e) { return ''; } }
+/* يرسل المتصفح (الإدارة) جداول الحضور وأثر المحسوبة، فتُكتب في قاعدة البيانات وجدول التقارير */
+function reportSync_(me, p) {
+  if (['system', 'admin'].indexOf(me.role) < 0) return {ok: false, error: 'forbidden'};
+  var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return ok_({busy: true});
+  try {
+    if (p.att && p.att.length > 1) writeTab_('التحضير اليومي', p.att);
+    if (p.athar && p.athar.length > 1) writeTab_('برنامج أثر', p.athar);
+  } finally { lock.releaseLock(); }
+  return ok_({url: CFG.REPORT_ID ? 'https://docs.google.com/spreadsheets/d/' + CFG.REPORT_ID + '/edit' : ''});
 }
 function grade_(s) { return s === null || s === '' || s === undefined ? '' : s >= 90 ? 'ممتاز' : s >= 80 ? 'جيد جداً' : s >= 70 ? 'جيد' : s >= 60 ? 'مقبول' : 'لم يجتز'; }
 function report_(coll, db) {
   if (coll === 'students') writeTab_('الطلاب المسجلون', [['الرقم', 'الاسم', 'الصف', 'المرحلة', 'الحلقة الرسمية', 'الجنسية', 'الحالة', 'رقم الجمعية']].concat(Object.keys(db.students || {}).sort().map(function (id) { var s = db.students[id]; return [id.replace(/^s/, ''), s.name || '', s.grade || '', s.stage || '', s.halaqa || '', s.nationality || '', s.status || '', s.assoc_no || '']; })));
   if (coll === 'teachers') writeTab_('المعلمون', [['الاسم', 'الحلقة الرسمية', 'المرحلة', 'الصفة', 'بطاقة معلم متطوع', 'انتهاؤها', 'بطاقة البركة', 'انتهاؤها']].concat(Object.keys(db.teachers || {}).map(function (id) { var t = db.teachers[id]; return ['أ. ' + (t.name || ''), t.halaqa || '', t.stage || '', t.role || '', t.card_ilm || '', t.card_ilm_exp || '', t.card_baraka || '', t.card_baraka_exp || '']; })));
-  if (coll === 'exams') writeTab_('الاختبارات', [['التاريخ', 'النوع', 'رقم الطالب', 'الطالب', 'الفرع', 'الحلقة', 'المرحلة', 'المختبر', 'الطريقة', 'الدرجة', 'التقدير', 'رفعه', 'ملاحظات']].concat(Object.keys(db.exams || {}).map(function (id) { return db.exams[id]; }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).map(function (e) { return [e.date || '', e.kind === 'داخلي' ? 'داخلي' : 'الجمعية', String(e.student_id || '').replace(/^s/, ''), e.student || '', e.branch || '', e.halaqa || '', e.stage || '', e.examiner || '', e.mode || '', e.score == null ? '' : e.score, e.grade || grade_(e.score), e.requested_by || '', e.notes || '']; })));
+  if (coll === 'exams') writeTab_('الاختبارات', [['التاريخ', 'الهجري', 'النوع', 'رقم الطالب', 'الطالب', 'الفرع', 'الحلقة', 'المرحلة', 'المختبر', 'الطريقة', 'الدرجة', 'التقدير', 'رفعه', 'ملاحظات']].concat(Object.keys(db.exams || {}).map(function (id) { return db.exams[id]; }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).map(function (e) { return [e.date || '', hijriStr_(e.date), e.kind === 'داخلي' ? 'داخلي' : 'الجمعية', String(e.student_id || '').replace(/^s/, ''), e.student || '', e.branch || '', e.halaqa || '', e.stage || '', e.examiner || '', e.mode || '', e.score == null ? '' : e.score, e.grade || grade_(e.score), e.requested_by || '', e.notes || '']; })));
 }
 
 /* ================= EXAM COMMITTEE ================= */
