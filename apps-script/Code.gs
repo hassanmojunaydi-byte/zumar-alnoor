@@ -677,14 +677,14 @@ function nk_(s) {
     .replace(/\s+/g, ' ').trim().replace(/(^| )عبد /g, '$1عبد').replace(/(^| )(ذو|ذا|ذي) /g, '$1ذو').replace(/ (بن|ابن) /g, ' ').replace(/ (بن|ابن) /g, ' ');
 }
 function regRows_(force) {
-  var c = CacheService.getScriptCache(), k = 'reg_rows_v1';
+  var c = CacheService.getScriptCache(), k = 'reg_rows_v2';
   if (!force) { var hit = c.get(k); if (hit) return JSON.parse(hit); }
   var out = [], seen = {};
   CFG.REG_IDS.forEach(function (id, si) {
     try {
       var sh = SpreadsheetApp.openById(id).getSheets()[0], v = sh.getDataRange().getDisplayValues();
       for (var i = v.length - 1; i >= 1; i--) { var r = v[i]; var full = String(r[1] || '').trim(); if (!full) continue;
-        var nid = String(r[4] || '').replace(/\D/g, ''), key = nid || nk_(full); if (seen[key]) continue; seen[key] = 1;
+        var nid = String(r[4] || '').replace(/\D/g, ''), key = nid + '|' + nk_(full); if (seen[key]) continue; seen[key] = 1;
         out.push({full: full, grade: r[2], nat: r[3], nid: nid, birth: r[6], hood: r[7], gid: String(r[8] || '').replace(/\D/g, ''), gphone: r[9], sphone: r[10], school: r[11], health: r[12], parents: r[13], lives: r[14], transport: r[15], year: si === 0 ? '1448' : '1447', at: r[0]}); }
     } catch (e) {}
   });
@@ -697,15 +697,18 @@ function extraSheet_() {
   return sh;
 }
 function extras_() { var v = extraSheet_().getDataRange().getDisplayValues(), o = {}; for (var i = 1; i < v.length; i++) if (v[i][0]) o[v[i][0] + '|' + String(v[i][2]).trim()] = {sphone: v[i][3], gphone: v[i][4], nid: v[i][5], note: v[i][6], row: i + 1}; return o; }
+function lev1_(a, b) { if (Math.abs(a.length - b.length) > 1) return false; var i = 0, j = 0, d = 0; while (i < a.length && j < b.length) { if (a[i] === b[j]) { i++; j++; continue; } if (++d > 1) return false; if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; } } return d + (a.length - i) + (b.length - j) <= 1; }
+function eqTok_(a, b) { return a === b || 'ال' + a === b || a === 'ال' + b || (a.length >= 4 && b.length >= 4 && lev1_(a, b)); }
 function matchReg_(name, regs) {
   var a = nk_(name).split(' '); if (!a[0]) return null;
   var best = null, bs = 0;
   regs.forEach(function (r) {
     var b = r._t || (r._t = nk_(r.full).split(' '));
-    if (b[0] !== a[0]) return;
-    var j = 1, ok = true; for (var i = 1; i < a.length; i++) { var f = false; while (j < b.length) { if (b[j] === a[i] || (b[j] === 'ال' + a[i]) || ('ال' + b[j] === a[i])) { f = true; j++; break; } j++; } if (!f) { ok = false; break; } }
-    if (!ok) return;
-    var sc = a.length * 10 - Math.abs(b.length - a.length) + (r.year === '1448' ? 1 : 0);
+    if (!(b[0] === a[0] || (b[0] === 'ذو' + a[0]) || (a[0].length >= 4 && lev1_(a[0], b[0])))) return;
+    var j = 1, ok = true; for (var i = 1; i < a.length; i++) { var f = false; while (j < b.length) { if (eqTok_(a[i], b[j])) { f = true; j++; break; } j++; } if (!f) { ok = false; break; } }
+    var sc = 0;
+    if (ok) sc = a.length * 10 - Math.abs(b.length - a.length) + (r.year === '1448' ? 1 : 0) + (b[0] === a[0] ? 2 : 0);
+    else if (a.length >= 2 && b.slice(1).some(function (t) { return eqTok_(a[a.length - 1], t); })) sc = 5 + (r.year === '1448' ? 1 : 0); // الاسم الأول + اسم العائلة فقط
     if (sc > bs) { bs = sc; best = r; }
   });
   return best;
