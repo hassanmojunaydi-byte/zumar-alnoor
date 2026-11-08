@@ -37,6 +37,7 @@ function api(req) { return JSON.stringify(handle_(req || {})); }
 function handle_(req) {
   try {
     var a = req.action, p = req.payload || {};
+    ensureTriggers_();
     if (a === 'public') return ok_({app: CFG.APP, clientId: prop_('GOOGLE_CLIENT_ID') || ''});
     if (a === 'code') return sendCode_(p.email, p.phone);
     if (a === 'resume') return resume_(p.device);
@@ -606,6 +607,19 @@ function importSeed_() {
     var d = readDb_().db; ['students', 'teachers', 'exams'].forEach(function (c) { try { report_(c, d); } catch (e) {} });
   }
   ss.deleteSheet(seed);
+}
+/* يُنشئ مشغّل التسخين تلقائياً مرة واحدة */
+function ensureTriggers_() {
+  try {
+    var pr = PropertiesService.getScriptProperties(); if (pr.getProperty('TRIG_V2')) return;
+    var lock = LockService.getScriptLock(); if (!lock.tryLock(1000)) return;
+    try { if (pr.getProperty('TRIG_V2')) return; installTriggersOnly_(); pr.setProperty('TRIG_V2', String(Date.now())); } finally { lock.releaseLock(); }
+  } catch (e) {}
+}
+function installTriggersOnly_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (['warmGrids', 'eveningDigest'].indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('warmGrids').timeBased().everyMinutes(5).create();
+  ScriptApp.newTrigger('eveningDigest').timeBased().atHour(21).everyDays(1).inTimezone('Asia/Riyadh').create();
 }
 /** تسخين ملفات التحضير كل 5 دقائق حتى يفتح التطبيق بسرعة */
 function warmGrids() {
