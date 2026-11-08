@@ -10,7 +10,8 @@ var CFG = {
   GRID_TTL: 900,          // ثوانٍ: مدة الاحتفاظ بقراءة ملف التحضير
   SESSION_DAYS: 60,
   REPORT_ID: '1d-0IT6tC2Tg3yoi258IgCs3y0qFm2eek6xp83cBBhiA',
-  TEACHER_FILES_FOLDER: '1aXXMQs45LlfPPXtDO6gtSYkQorhPXNsw' // «صور وملفات المعلمين»
+  TEACHER_FILES_FOLDER: '1aXXMQs45LlfPPXtDO6gtSYkQorhPXNsw', // «صور وملفات المعلمين»
+  REG_IDS: ['1TOwBiMn4rONMmGbzkQjzbqVuLSIteR2TbNuIK-pe8P8', '1NK8QPaf9WQaUSXA5bDzcl7m5ZLb3SJ5ISb-sokQZlTc'] // نماذج التسجيل 1448 ثم 1447
 };
 var ROLE_AR = {system:'النظام', admin:'الإدارة', exams:'لجنة الاختبارات', teacher:'معلم'};
 var ROLE_EN = {'النظام':'system','الإدارة':'admin','لجنة الاختبارات':'exams','معلم':'teacher'};
@@ -56,6 +57,8 @@ function handle_(req) {
     if (a === 'notify') return notifyCommittee_(me, p.date);
     if (a === 'reportSync') return reportSync_(me, p);
     if (a === 'studentReports') return studentReports_(me, p);
+    if (a === 'roster') return roster_(me, p);
+    if (a === 'contact') return contact_(me, p);
     if (a === 'photos') return photos_(me);
     if (a === 'photo') return setPhoto_(me, p);
     if (a === 'importPhotos') return importPhotos_(me);
@@ -356,7 +359,7 @@ function boot_(me, p) {
     if (tid && tid === athAdmin) { data.athar = db.athar || {}; data.athar_log = db.athar_log || {}; }
     data.tasmee = {}; Object.keys(db.tasmee || {}).forEach(function (id) { if (myIds.indexOf(id.split('_')[0]) >= 0) data.tasmee[id] = db.tasmee[id]; });
     data.tatt = {}; Object.keys(db.tatt || {}).forEach(function (id) { if (tid && id.indexOf(tid + '_') === 0) data.tatt[id] = db.tatt[id]; });
-    data.config.perms = (db.config || {}).perms || {}; data.config.grants = (db.config || {}).grants || {}; data.config.exam = (db.config || {}).exam || {};
+    data.config.perms = (db.config || {}).perms || {}; data.config.grants = (db.config || {}).grants || {}; data.config.exam = (db.config || {}).exam || {}; data.config.phrases = (db.config || {}).phrases || null;
     data.students = {}; if (me.role === 'exams' || hasGrant_(db, me.email, 'committee')) data.students = db.students || {};
   }
   var out = {me: pub, data: data, link: appUrl_(), serverTime: new Date().toISOString(), photosVer: (prop_('PHOTOS_VER') || '0') + ':' + Object.keys(db.photos || {}).map(function (k) { return k + (db.photos[k].file || '').slice(-4); }).join('')};
@@ -665,4 +668,70 @@ function fixUlya() {
     SpreadsheetApp.flush(); try { report_('students', readDb_().db); } catch (e) {}
     Logger.log('تم إسناد ' + n + ' طالباً');
   } finally { lock.releaseLock(); }
+}
+
+
+/* ================= بيانات الطلاب من نماذج التسجيل ================= */
+function nk_(s) {
+  return String(s || '').replace(/[‎‏ً-ْ]/g, '').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي').replace(/[.\-_,]/g, ' ')
+    .replace(/\s+/g, ' ').trim().replace(/(^| )عبد /g, '$1عبد').replace(/(^| )(ذو|ذا|ذي) /g, '$1ذو').replace(/ (بن|ابن) /g, ' ').replace(/ (بن|ابن) /g, ' ');
+}
+function regRows_(force) {
+  var c = CacheService.getScriptCache(), k = 'reg_rows_v1';
+  if (!force) { var hit = c.get(k); if (hit) return JSON.parse(hit); }
+  var out = [], seen = {};
+  CFG.REG_IDS.forEach(function (id, si) {
+    try {
+      var sh = SpreadsheetApp.openById(id).getSheets()[0], v = sh.getDataRange().getDisplayValues();
+      for (var i = v.length - 1; i >= 1; i--) { var r = v[i]; var full = String(r[1] || '').trim(); if (!full) continue;
+        var nid = String(r[4] || '').replace(/\D/g, ''), key = nid || nk_(full); if (seen[key]) continue; seen[key] = 1;
+        out.push({full: full, grade: r[2], nat: r[3], nid: nid, birth: r[6], hood: r[7], gid: String(r[8] || '').replace(/\D/g, ''), gphone: r[9], sphone: r[10], school: r[11], health: r[12], parents: r[13], lives: r[14], transport: r[15], year: si === 0 ? '1448' : '1447', at: r[0]}); }
+    } catch (e) {}
+  });
+  try { c.put(k, JSON.stringify(out), 1800); } catch (e) {}
+  return out;
+}
+function extraSheet_() {
+  var ss = master_(), sh = ss.getSheetByName('بيانات الطلاب الإضافية');
+  if (!sh) { sh = ss.insertSheet('بيانات الطلاب الإضافية'); sh.setRightToLeft(true); sh.appendRow(['رمز الحلقة', 'الحلقة', 'اسم الطالب في الكشف', 'جوال الطالب', 'جوال ولي الأمر', 'هوية الطالب', 'ملاحظة', 'عدّله', 'التاريخ']); sh.setFrozenRows(1); }
+  return sh;
+}
+function extras_() { var v = extraSheet_().getDataRange().getDisplayValues(), o = {}; for (var i = 1; i < v.length; i++) if (v[i][0]) o[v[i][0] + '|' + String(v[i][2]).trim()] = {sphone: v[i][3], gphone: v[i][4], nid: v[i][5], note: v[i][6], row: i + 1}; return o; }
+function matchReg_(name, regs) {
+  var a = nk_(name).split(' '); if (!a[0]) return null;
+  var best = null, bs = 0;
+  regs.forEach(function (r) {
+    var b = r._t || (r._t = nk_(r.full).split(' '));
+    if (b[0] !== a[0]) return;
+    var j = 1, ok = true; for (var i = 1; i < a.length; i++) { var f = false; while (j < b.length) { if (b[j] === a[i] || (b[j] === 'ال' + a[i]) || ('ال' + b[j] === a[i])) { f = true; j++; break; } j++; } if (!f) { ok = false; break; } }
+    if (!ok) return;
+    var sc = a.length * 10 - Math.abs(b.length - a.length) + (r.year === '1448' ? 1 : 0);
+    if (sc > bs) { bs = sc; best = r; }
+  });
+  return best;
+}
+function canFile_(me, db, f) { return me.role === 'system' || me.role === 'admin' || teacherFiles_([f], me.tname).length > 0; }
+function roster_(me, p) {
+  var db = readDb_().db, files = allFiles_(db).filter(function (f) { return (!p.fid || f.id === p.fid) && canFile_(me, db, f); });
+  var regs = regRows_(!!p.force), ex = extras_(), out = {}, stats = {students: 0, matched: 0, phone: 0};
+  files.forEach(function (f) {
+    var o = out[f.id] = {};
+    (f.students || []).forEach(function (n) {
+      var r = matchReg_(n, regs), e = ex[f.id + '|' + n] || {}, d = r ? JSON.parse(JSON.stringify(r)) : {};
+      delete d._t; if (e.sphone) d.sphone = e.sphone; if (e.gphone) d.gphone = e.gphone; if (e.nid) d.nid = e.nid; if (e.note) d.note = e.note;
+      d.matched = !!r; d.manual = !!(e.sphone || e.gphone || e.nid);
+      stats.students++; if (r) stats.matched++; if (d.sphone || d.gphone) stats.phone++;
+      o[n] = d;
+    });
+  });
+  return ok_({roster: out, stats: stats, regCount: regs.length});
+}
+function contact_(me, p) {
+  var db = readDb_().db, meta = (db.files || {})[p.fid]; if (!meta) return {ok: false, error: 'الحلقة غير موجودة'};
+  var f = readFile_({id: p.fid, file_id: meta.file_id, halaqa: meta.halaqa, stage: meta.stage, order: meta.order});
+  if (!canFile_(me, db, f)) return {ok: false, error: 'لا تملك صلاحية هذه الحلقة'};
+  var sh = extraSheet_(), ex = extras_(), cur = ex[p.fid + '|' + p.name];
+  var row = [p.fid, meta.halaqa, p.name, "'" + String(p.sphone || ''), "'" + String(p.gphone || ''), "'" + String(p.nid || ''), p.note || '', me.email, Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm')];
+  if (cur) sh.getRange(cur.row, 1, 1, row.length).setValues([row]); else sh.appendRow(row);
+  return ok_({});
 }
