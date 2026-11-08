@@ -11,6 +11,8 @@ var CFG = {
   SESSION_DAYS: 60,
   REPORT_ID: '1d-0IT6tC2Tg3yoi258IgCs3y0qFm2eek6xp83cBBhiA',
   TEACHER_FILES_FOLDER: '1aXXMQs45LlfPPXtDO6gtSYkQorhPXNsw', // «صور وملفات المعلمين»
+  EXAMS_FOLDER: '1C-MVkIDTd32gdyJGbXf0FK71tBbWvOpj', // «اختبارات الجمعية»
+  EXAMS_BOOK: '1-9703iB9aw_fnOTk4J5M_MxIEDRetPJFtdW6xHGjkfk', // «رفع الطلاب للإختبارات 1448هـ — من منصة زمر النور»
   REG_IDS: ['1TOwBiMn4rONMmGbzkQjzbqVuLSIteR2TbNuIK-pe8P8', '1NK8QPaf9WQaUSXA5bDzcl7m5ZLb3SJ5ISb-sokQZlTc'] // نماذج التسجيل 1448 ثم 1447
 };
 var ROLE_AR = {system:'النظام', admin:'الإدارة', exams:'لجنة الاختبارات', teacher:'معلم'};
@@ -59,6 +61,7 @@ function handle_(req) {
     if (a === 'studentReports') return studentReports_(me, p);
     if (a === 'roster') return roster_(me, p);
     if (a === 'contact') return contact_(me, p);
+    if (a === 'examsSync') { if (me.role !== 'system' && me.role !== 'admin') return {ok: false, error: 'للإدارة فقط'}; return ok_({url: syncExamsBook_(readDb_().db)}); }
     if (a === 'photos') return photos_(me);
     if (a === 'photo') return setPhoto_(me, p);
     if (a === 'importPhotos') return importPhotos_(me);
@@ -364,6 +367,7 @@ function boot_(me, p) {
   }
   var out = {me: pub, data: data, link: appUrl_(), serverTime: new Date().toISOString(), photosVer: (prop_('PHOTOS_VER') || '0') + ':' + Object.keys(db.photos || {}).map(function (k) { return k + (db.photos[k].file || '').slice(-4); }).join('')};
   if (me.role === 'system') out.accounts = readAccounts_();
+  if (full) out.examsBook = 'https://docs.google.com/spreadsheets/d/' + (prop_('EXAMS_BOOK') || CFG.EXAMS_BOOK) + '/edit';
   var etag = Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify(out.data) + JSON.stringify(out.me) + (out.accounts ? JSON.stringify(out.accounts) : '')));
   if (p.etag && p.etag === etag) return ok_({same: true, etag: etag});
   out.etag = etag;
@@ -419,6 +423,7 @@ function write_(me, p) {
     SpreadsheetApp.flush();
     (db[coll] = db[coll] || {}); if (doc) db[coll][id] = doc; else delete db[coll][id];
     try { report_(coll, db); } catch (e) {}
+    if (coll === 'exams') { try { syncExamsBook_(db); } catch (e) {} }
     return ok_({id: id, doc: doc});
   } finally { lock.releaseLock(); }
 }
@@ -737,4 +742,74 @@ function contact_(me, p) {
   var row = [p.fid, meta.halaqa, p.name, "'" + String(p.sphone || ''), "'" + String(p.gphone || ''), "'" + String(p.nid || ''), p.note || '', me.email, Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm')];
   if (cur) sh.getRange(cur.row, 1, 1, row.length).setValues([row]); else sh.appendRow(row);
   return ok_({});
+}
+
+
+/* ================= ملف المختبرين في الدرايف (المنصة هي الأصل) ================= */
+/* يُعاد بناؤه تلقائياً بعد كل حفظ في الاختبارات، بنفس أعمدة «رفع الطلاب للإختبارات» */
+function examsBook_() {
+  var id = prop_('EXAMS_BOOK') || CFG.EXAMS_BOOK, ss = null;
+  if (id) { try { ss = SpreadsheetApp.openById(id); } catch (e) { ss = null; } }
+  if (!ss) {
+    ss = SpreadsheetApp.create('رفع الطلاب للإختبارات 1448هـ — من منصة زمر النور');
+    try { var f = DriveApp.getFileById(ss.getId()); DriveApp.getFolderById(CFG.EXAMS_FOLDER).addFile(f); DriveApp.getRootFolder().removeFile(f); } catch (e) {}
+    PropertiesService.getScriptProperties().setProperty('EXAMS_BOOK', ss.getId());
+  }
+  return ss;
+}
+function gDate_(d) { return d ? d.replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$3-$2-$1') : ''; }
+var DAY_AR = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+function styleTab_(sh, head, cols) {
+  sh.setRightToLeft(true);
+  sh.getRange(head, 1, 1, cols).setFontWeight('bold').setBackground('#6a1820').setFontColor('#ffffff').setHorizontalAlignment('center');
+  sh.setFrozenRows(head);
+}
+function syncExamsBook_(db) {
+  var ss = examsBook_(), now = Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm');
+  var all = Object.keys(db.exams || {}).map(function (id) { var e = db.exams[id]; e._id = id; return e; });
+  var assoc = all.filter(function (e) { return e.kind !== 'داخلي'; }), done = function (e) { return e.score !== null && e.score !== '' && e.score !== undefined; };
+  var regs = []; try { regs = regRows_(); } catch (e) {}
+  var info = function (e) { var st = (db.students || {})[e.student_id] || {}; var r = regs.length ? matchReg_(e.student || st.name, regs) : null; return {nid: (r && r.nid) || st.nid || '', phone: (r && (r.gphone || r.sphone)) || '', nat: e.nationality || st.nationality || (r && r.nat) || '', grade: st.grade || (r && r.grade) || ''}; };
+  // 1) المختبرون (الجمعية) مجمّعين حسب يوم الاختبار
+  var tested = assoc.filter(done).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)) || String(a.examiner || '').localeCompare(String(b.examiner || '')); });
+  var head = ['الترقيم الكلي', 'الرقم', 'اسم المعلم', 'رقم الطالب', 'اسم الطالب', 'فرع الإختبار', 'الجنسية', 'الحلقة المضاف إليها', 'المرحلة', 'الصف', 'موعد الإختبار', 'الهجري', 'نتيجة', 'التقدير', 'الطريقة', 'الهوية', 'جوال ولي الأمر', 'ملاحظات'];
+  var rows = [['ملف المختبرين — يُحدَّث تلقائياً من منصة حلقات زمر النور · آخر تحديث ' + now], head], day = null, n = 0, k = 0;
+  tested.forEach(function (e) {
+    if (e.date !== day) { day = e.date; k = 0; var x = new Date(day + 'T12:00:00+03:00'); var r = new Array(head.length).fill(''); r[2] = DAY_AR[x.getDay()]; r[3] = gDate_(day); r[4] = hijriStr_(day); rows.push(r); }
+    var i = info(e); n++; k++;
+    rows.push([n, k, e.examiner || '', String(e.student_id || '').replace(/^s/, ''), e.student || '', e.branch || '', i.nat, e.halaqa || '', e.stage || '', i.grade, gDate_(e.date), hijriStr_(e.date), Number(e.score), e.grade || grade_(e.score), e.mode || '', i.nid ? "'" + i.nid : '', i.phone ? "'" + i.phone : '', e.notes || '']);
+  });
+  var sh = ss.getSheetByName('المختبرون 1448') || ss.insertSheet('المختبرون 1448', 0); sh.clear();
+  sh.getRange(1, 1, rows.length, head.length).setValues(rows.map(function (r) { while (r.length < head.length) r.push(''); return r; }));
+  styleTab_(sh, 2, head.length); sh.getRange(1, 1).setFontWeight('bold').setFontColor('#6a1820');
+  for (var ri = 3; ri <= rows.length; ri++) if (rows[ri - 1][0] === '') sh.getRange(ri, 1, 1, head.length).setBackground('#f3e7c9').setFontWeight('bold');
+  // 2) المجدولون (لم تُرصد نتيجتهم بعد)
+  var sched = assoc.filter(function (e) { return !done(e); }).sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); });
+  var h2 = ['موعد الإختبار', 'الهجري', 'اليوم', 'اسم الطالب', 'فرع الإختبار', 'الحلقة', 'المرحلة', 'اسم المعلم', 'الطريقة', 'الهوية', 'جوال ولي الأمر', 'ملاحظات'];
+  var sh2 = ss.getSheetByName('المجدولون') || ss.insertSheet('المجدولون'); sh2.clear();
+  var r2 = [h2].concat(sched.map(function (e) { var i = info(e); return [gDate_(e.date), hijriStr_(e.date), DAY_AR[new Date(e.date + 'T12:00:00+03:00').getDay()] || '', e.student || '', e.branch || '', e.halaqa || '', e.stage || '', e.examiner || '', e.mode || '', i.nid ? "'" + i.nid : '', i.phone ? "'" + i.phone : '', e.notes || '']; }));
+  sh2.getRange(1, 1, r2.length, h2.length).setValues(r2); styleTab_(sh2, 1, h2.length);
+  // 3) إنتاجية المعلمين والمراحل
+  var target = Number(((db.config || {}).targets || {}).per_halaqa) || 14, by = {}, stg = {};
+  tested.forEach(function (e) { var t = e.examiner || '—'; by[t] = by[t] || {n: 0, halaqa: e.halaqa || '', stage: e.stage || '', br: 0}; by[t].n++; by[t].br += Number(e.branch) || 0; stg[e.stage || '—'] = (stg[e.stage || '—'] || 0) + 1; });
+  var h3 = ['اسم المعلم', 'الحلقة', 'المرحلة', 'عدد الطلاب المختبرين (المنجز)', 'المتبقي من ' + target, 'نسبة الإنجاز', 'مجموع الأجزاء', 'الإكتمال'];
+  var r3 = [h3].concat(Object.keys(by).sort(function (a, b) { return by[b].n - by[a].n; }).map(function (t) { var x = by[t]; return [t, x.halaqa, x.stage, x.n, Math.max(0, target - x.n), Math.min(1, x.n / target), x.br, x.n >= target ? 'مكتمل' : '']; }));
+  r3.push(['الإجمالي', '', '', tested.length, '', '', '', '']); r3.push(['', '', '', '', '', '', '', '']); r3.push(['المرحلة', 'تم اختبارهم', '', '', '', '', '', '']);
+  Object.keys(stg).forEach(function (k2) { r3.push([k2, stg[k2], '', '', '', '', '', '']); });
+  var sh3 = ss.getSheetByName('الإنتاجية') || ss.insertSheet('الإنتاجية'); sh3.clear();
+  sh3.getRange(1, 1, r3.length, h3.length).setValues(r3); styleTab_(sh3, 1, h3.length); sh3.getRange(2, 6, Math.max(1, r3.length - 1), 1).setNumberFormat('0%');
+  // 4) الاختبار الداخلي
+  var ints = all.filter(function (e) { return e.kind === 'داخلي'; }).sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
+  var h4 = ['التاريخ', 'الهجري', 'الطالب', 'الحلقة', 'المرحلة', 'الفرع', 'الحالة', 'الدرجة', 'النتيجة', 'تلقيني', 'تنبيهي', 'تجويدي', 'النظري', 'الأداء', 'جوانب القصور', 'المختبِر', 'رُفع للجمعية'];
+  var r4 = [h4].concat(ints.map(function (e) { var d = done(e); return [gDate_(e.date), hijriStr_(e.date), e.student || '', e.halaqa || '', e.stage || '', e.branch || '', d ? 'منجز' : (e.status || 'مرفوع'), d ? Number(e.score) : '', d ? (e.passed || Number(e.score) >= 90 ? 'ناجح' : 'يحتاج إلى مراجعة') : '', e.errors == null ? '' : e.errors, e.tanbih == null ? '' : e.tanbih, e.tajweed == null ? '' : e.tajweed, e.n1 == null ? '' : (Number(e.n1) + Number(e.n2 || 0)), e.adaa == null ? '' : e.adaa, e.weak_txt || '', e.examiner || '', e.promoted ? 'نعم' : '']; }));
+  var sh4 = ss.getSheetByName('الاختبار الداخلي') || ss.insertSheet('الاختبار الداخلي'); sh4.clear();
+  sh4.getRange(1, 1, r4.length, h4.length).setValues(r4); styleTab_(sh4, 1, h4.length);
+  // 5) الطلاب: من اختُبر ومن لم يُختبر
+  var lastOf = {}; tested.forEach(function (e) { var k3 = e.student_id || e.student; lastOf[k3] = lastOf[k3] || {n: 0, max: 0, last: ''}; lastOf[k3].n++; lastOf[k3].max = Math.max(lastOf[k3].max, Number(e.branch) || 0); lastOf[k3].last = e.date; });
+  var h5 = ['رقم الطالب', 'اسم الطالب', 'الصف', 'المرحلة', 'الحلقة الرسمية', 'الجنسية', 'الحالة', 'عدد اختباراته 1448', 'أعلى فرع', 'آخر اختبار'];
+  var r5 = [h5].concat(Object.keys(db.students || {}).sort().map(function (id) { var st = db.students[id], x = lastOf[id] || lastOf[st.name]; return [id.replace(/^s/, ''), st.name || '', st.grade || '', st.stage || '', st.halaqa || '', st.nationality || '', x ? 'مختبر' : 'لم يُختبر', x ? x.n : 0, x ? x.max : '', x ? gDate_(x.last) : '']; }));
+  var sh5 = ss.getSheetByName('الطلاب') || ss.insertSheet('الطلاب'); sh5.clear();
+  sh5.getRange(1, 1, r5.length, h5.length).setValues(r5); styleTab_(sh5, 1, h5.length);
+  var def = ss.getSheetByName('Sheet1') || ss.getSheetByName('الورقة1'); if (def && ss.getSheets().length > 1) ss.deleteSheet(def);
+  return ss.getUrl();
 }
