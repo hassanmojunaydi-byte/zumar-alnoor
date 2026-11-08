@@ -7,7 +7,7 @@ var CFG = {
   MASTER_ID: '1vF_rbFEAbQCN-oTgUrOWjScOkAkTKAXJFD9hxS4j_5E',
   OWNERS: ['hassan.mo.junaydi@gmail.com'],
   APP: 'حلقات زمر النور',
-  GRID_TTL: 90,          // ثوانٍ: مدة الاحتفاظ بقراءة ملف التحضير
+  GRID_TTL: 900,          // ثوانٍ: مدة الاحتفاظ بقراءة ملف التحضير
   SESSION_DAYS: 60,
   REPORT_ID: '1d-0IT6tC2Tg3yoi258IgCs3y0qFm2eek6xp83cBBhiA',
   TEACHER_FILES_FOLDER: '1aXXMQs45LlfPPXtDO6gtSYkQorhPXNsw' // «صور وملفات المعلمين»
@@ -54,6 +54,7 @@ function handle_(req) {
     if (a === 'accounts') return accounts_(me, p);
     if (a === 'notify') return notifyCommittee_(me, p.date);
     if (a === 'reportSync') return reportSync_(me, p);
+    if (a === 'studentReports') return studentReports_(me, p);
     if (a === 'photos') return photos_(me);
     if (a === 'photo') return setPhoto_(me, p);
     if (a === 'importPhotos') return importPhotos_(me);
@@ -293,7 +294,7 @@ function pickSheet_(ss, fid) {
 function readFile_(meta, force) {
   var c = CacheService.getScriptCache(), k = 'grid_' + meta.id;
   if (!force) { var hit = c.get(k); if (hit) return JSON.parse(hit); }
-  var out = {id: meta.id, file_id: meta.file_id, halaqa: meta.halaqa, stage: meta.stage, order: meta.order, teachers: meta.teachers || [], students: meta.students || [], grid: null, sheet: meta.sheet, first_sunday: meta.first_sunday, synced_at: null};
+  var out = {id: meta.id, file_id: meta.file_id, halaqa: meta.halaqa, stage: meta.stage, order: meta.order, teachers: meta.teachers || [], students: meta.students || [], grid: null, sheet: meta.sheet, first_sunday: meta.first_sunday, synced_at: null, has_reports: !!meta.report_book};
   try {
     var ss = SpreadsheetApp.openById(meta.file_id), sel = pickSheet_(ss, meta.id);
     if (sel) {
@@ -311,7 +312,7 @@ function readFile_(meta, force) {
   return out;
 }
 function allFiles_(db) {
-  var metas = Object.keys(db.files || {}).map(function (id) { var f = db.files[id]; return {id: id, file_id: f.file_id, halaqa: f.halaqa, stage: f.stage, order: f.order, teachers: f.teachers, students: f.students, sheet: f.sheet, first_sunday: f.first_sunday}; });
+  var metas = Object.keys(db.files || {}).map(function (id) { var f = db.files[id]; return {id: id, file_id: f.file_id, halaqa: f.halaqa, stage: f.stage, order: f.order, teachers: f.teachers, students: f.students, sheet: f.sheet, first_sunday: f.first_sunday, report_book: f.report_book}; });
   metas.sort(function (a, b) { return (a.order || 99) - (b.order || 99); });
   return metas.map(function (m) { return readFile_(m); });
 }
@@ -337,21 +338,25 @@ function boot_(me, p) {
   var tid = tidOf_(db, me.tname);
   var athAdmin = ((db.config || {}).athar || {}).admin_teacher_id;
   if (full) {
-    ['teachers', 'students', 'exams', 'athar', 'meetings', 'config', 'athar_log', 'tasmee'].forEach(function (c) { data[c] = db[c] || {}; });
+    ['teachers', 'students', 'exams', 'athar', 'meetings', 'config', 'athar_log', 'tasmee', 'tatt'].forEach(function (c) { data[c] = db[c] || {}; });
     data.files = {}; files.forEach(function (f) { data.files[f.id] = f; });
   } else {
     var mine = teacherFiles_(files, me.tname), myIds = mine.map(function (f) { return f.id; });
-    data.files = {}; mine.forEach(function (f) { data.files[f.id] = f; });
+    var committee = me.role === 'exams' || hasGrant_(db, me.email, 'committee');
+    data.files = {}; (committee ? files : mine).forEach(function (f) { data.files[f.id] = f; });
     data.teachers = {}; Object.keys(db.teachers || {}).forEach(function (id) { var t = db.teachers[id]; data.teachers[id] = {name: t.name, aliases: t.aliases || [], order: t.order}; });
     data.meetings = db.meetings || {}; data.config = {athar: (db.config || {}).athar || {}, targets: (db.config || {}).targets || {}};
     data.exams = {};
     Object.keys(db.exams || {}).forEach(function (id) { var e = db.exams[id];
-      if (e.kind === 'داخلي' && (me.role === 'exams' || myIds.indexOf(e.fid) >= 0 || e.requested_by === me.email)) data.exams[id] = e; });
+      if (e.kind === 'داخلي' && (me.role === 'exams' || hasGrant_(db, me.email, 'committee') || myIds.indexOf(e.fid) >= 0 || e.requested_by === me.email)) data.exams[id] = e; });
     data.athar = {}; data.athar_log = {};
     if (tid && db.athar && db.athar[tid]) data.athar[tid] = db.athar[tid];
     Object.keys(db.athar_log || {}).forEach(function (id) { if (tid && (id.indexOf(tid + '_') === 0 || tid === athAdmin)) data.athar_log[id] = db.athar_log[id]; });
     if (tid && tid === athAdmin) { data.athar = db.athar || {}; data.athar_log = db.athar_log || {}; }
     data.tasmee = {}; Object.keys(db.tasmee || {}).forEach(function (id) { if (myIds.indexOf(id.split('_')[0]) >= 0) data.tasmee[id] = db.tasmee[id]; });
+    data.tatt = {}; Object.keys(db.tatt || {}).forEach(function (id) { if (tid && id.indexOf(tid + '_') === 0) data.tatt[id] = db.tatt[id]; });
+    data.config.perms = (db.config || {}).perms || {}; data.config.grants = (db.config || {}).grants || {}; data.config.exam = (db.config || {}).exam || {};
+    data.students = {}; if (me.role === 'exams' || hasGrant_(db, me.email, 'committee')) data.students = db.students || {};
   }
   var out = {me: pub, data: data, link: appUrl_(), serverTime: new Date().toISOString(), photosVer: (prop_('PHOTOS_VER') || '0') + ':' + Object.keys(db.photos || {}).map(function (k) { return k + (db.photos[k].file || '').slice(-4); }).join('')};
   if (me.role === 'system') out.accounts = readAccounts_();
@@ -372,19 +377,24 @@ function canWrite_(me, db, coll, id, op, data, cur) {
   if (coll === 'config') return false;
   if (r === 'admin') return true;
   var tid = tidOf_(db, me.tname), athAdmin = ((db.config || {}).athar || {}).admin_teacher_id;
+  if (coll === 'tatt') return !!tid && id.indexOf(tid + '_') === 0 && op !== 'delete';
   if (coll === 'athar_log') return !!tid && (id.indexOf(tid + '_') === 0 || tid === athAdmin);
   if (coll === 'meetings') return !!tid && tid === athAdmin && op === 'update';
   if (coll === 'athar') return !!tid && tid === athAdmin;
   if (coll === 'exams') {
+    if (r !== 'exams' && hasGrant_(db, me.email, 'committee')) r = 'exams';
     var files = allFiles_(db), mine = teacherFiles_(files, me.tname).map(function (f) { return f.id; });
     if (op === 'set' && !cur) {
       if (!data || data.kind !== 'داخلي') return false;
+      if (r === 'exams' && data.adhoc) return true; // اختبار مباشر من اللجنة
       if (!nextExamDayOk_(data.date)) throw new Error('انتهى وقت الرفع لهذا اليوم. الرفع يكون قبل يوم الاختبار.');
       return r === 'exams' || mine.indexOf(data.fid) >= 0;
     }
     if (!cur || cur.kind !== 'داخلي') return false;
     if (r === 'exams') return true;
     if (op === 'delete') return cur.requested_by === me.email && today_() < cur.date && (cur.score == null || cur.score === '');
+    // المعلم يرد على ملاحظات اللجنة على طالبه
+    if (op === 'update' && data && Object.keys(data).every(function (k) { return k === 'thread'; })) return cur.requested_by === me.email || mine.indexOf(cur.fid) >= 0;
     return false;
   }
   return false;
@@ -415,9 +425,10 @@ function tasmee_(me, p) {
   var allowed = me.role === 'system' || me.role === 'admin' || teacherFiles_([f], me.tname).length > 0;
   if (!allowed) return {ok: false, error: 'لا تملك صلاحية الرصد في هذه الحلقة'};
   var fs = f.first_sunday, diff = Math.round((new Date(p.date + 'T12:00:00+03:00') - new Date(fs + 'T12:00:00+03:00')) / 864e5);
-  var w = Math.floor(diff / 7), d = diff % 7;
-  if (w < 0 || w > 4 || d > 3) return {ok: false, error: 'لا يوجد عمود تسميع لهذا اليوم'};
-  var col = 4 + 9 * w + 2 * d + 1; // رقم العمود في الورقة (1-based)
+  var w = Math.floor(diff / 7), d = diff % 7, isH = p.kind === 'h';
+  if (w < 0 || w > 4 || d > (isH ? 4 : 3)) return {ok: false, error: isH ? 'لا يوجد عمود حضور لهذا اليوم' : 'لا يوجد عمود تسميع لهذا اليوم'};
+  if (isH && ['', 'حاضر', 'متأخر', 'غائب', 'معتذر'].indexOf(p.value || '') < 0) return {ok: false, error: 'قيمة حضور غير صحيحة'};
+  var col = isH ? (d === 4 ? 3 + 9 * w + 8 + 1 : 3 + 9 * w + 2 * d + 1) : 4 + 9 * w + 2 * d + 1; // رقم العمود في الورقة (1-based)
   var lock = LockService.getScriptLock(); lock.waitLock(20000);
   try {
     var ss = SpreadsheetApp.openById(meta.file_id), sh = ss.getSheetByName(f.sheet);
@@ -429,8 +440,20 @@ function tasmee_(me, p) {
   CacheService.getScriptCache().remove('grid_' + p.fid);
   var log = master_().getSheetByName('سجل التسميع') || master_().insertSheet('سجل التسميع');
   if (log.getLastRow() === 0) { log.setRightToLeft(true); log.appendRow(['الوقت', 'التاريخ', 'الحلقة', 'الطالب', 'التسميع', 'رصده']); }
-  log.appendRow([Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'), p.date, meta.halaqa, p.name, p.value || '(مسح)', me.email]);
+  log.appendRow([Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'), p.date, meta.halaqa, p.name, (isH ? 'حضور: ' : '') + (p.value || '(مسح)'), me.email]);
   return ok_({file: readFile_({id: p.fid, file_id: meta.file_id, halaqa: meta.halaqa, stage: meta.stage, order: meta.order}, true)});
+}
+
+function hasGrant_(db, email, key) { var g = ((db.config || {}).grants || {})[String(email || '').toLowerCase()] || []; return g.indexOf(key) >= 0; }
+/* تقارير الطلاب: تُقرأ من ملف تقارير الحلقة إن وُجد (report_book في بيانات الحلقة) */
+function studentReports_(me, p) {
+  var db = readDb_().db, meta = (db.files || {})[p.fid]; if (!meta) return {ok: false, error: 'الحلقة غير موجودة'};
+  var f = readFile_({id: p.fid, file_id: meta.file_id, halaqa: meta.halaqa, stage: meta.stage, order: meta.order});
+  if (!(me.role === 'system' || me.role === 'admin' || teacherFiles_([f], me.tname).length)) return {ok: false, error: 'لا تملك صلاحية هذه الحلقة'};
+  if (!meta.report_book) return ok_({rows: []});
+  var sh = SpreadsheetApp.openById(meta.report_book).getSheetByName('تقارير الطلاب'); if (!sh) return ok_({rows: []});
+  var v = sh.getRange(6, 1, Math.max(1, sh.getLastRow() - 5), 5).getDisplayValues();
+  return ok_({rows: v.filter(function (r) { return String(r[1]).trim(); }).map(function (r) { return {name: String(r[1]).trim(), phone: String(r[2]).trim(), text: String(r[4])}; }), weeks: sh.getRange(2, 2, 2, 5).getDisplayValues()});
 }
 
 /* ================= TEACHER PHOTOS ================= */
@@ -583,6 +606,17 @@ function importSeed_() {
     var d = readDb_().db; ['students', 'teachers', 'exams'].forEach(function (c) { try { report_(c, d); } catch (e) {} });
   }
   ss.deleteSheet(seed);
+}
+/** تسخين ملفات التحضير كل 5 دقائق حتى يفتح التطبيق بسرعة */
+function warmGrids() {
+  try { var db = readDb_().db; Object.keys(db.files || {}).forEach(function (id) { var f = db.files[id]; readFile_({id: id, file_id: f.file_id, halaqa: f.halaqa, stage: f.stage, order: f.order, teachers: f.teachers, students: f.students, sheet: f.sheet, first_sunday: f.first_sunday}, true); }); } catch (e) {}
+}
+/** شغّلها مرة واحدة من المحرر: تُنشئ مشغّل التسخين ومشغّل كشف اللجنة */
+function installTriggers() {
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (['warmGrids', 'eveningDigest'].indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('warmGrids').timeBased().everyMinutes(5).create();
+  ScriptApp.newTrigger('eveningDigest').timeBased().atHour(21).everyDays(1).inTimezone('Asia/Riyadh').create();
+  warmGrids();
 }
 function setup() {
   accSheet_(); dbSheet_();
