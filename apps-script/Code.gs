@@ -111,9 +111,31 @@ function readAccounts_() {
   for (var i = 1; i < v.length; i++) {
     var r = v[i]; if (!r[0] && !r[1]) continue;
     out.push({row: i + 1, email: String(r[0] || '').trim().toLowerCase(), name: String(r[1] || ''), role: ROLE_EN[String(r[2] || '').trim()] || '',
-      tname: canon_(r[3]), status: String(r[4] || ''), requested: r[5] ? String(r[5]) : '', last: r[6] ? String(r[6]) : '', notes: String(r[7] || ''), phone: String(r[8] || '')});
+      tname: canon_(r[3]), status: String(r[4] || ''), requested: dt_(r[5]), last: dt_(r[6]), notes: String(r[7] || ''), phone: String(r[8] || '')});
   }
   return out;
+}
+/* التاريخ في الحسابات قد يحوّله Sheets إلى تاريخ، فنوحّد صيغته */
+function dt_(v) { if (!v) return ''; if (Object.prototype.toString.call(v) === '[object Date]') return Utilities.formatDate(v, 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'); return String(v); }
+function nowStr_() { return Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'); }
+/* آخر ظهور: يُحدَّث عند كل فتح للمنصة (مرة كل 10 دقائق على الأكثر) وليس عند الدخول فقط */
+function touch_(me) {
+  try {
+    var c = CacheService.getScriptCache(), k = 'seen_' + me.email; if (c.get(k)) return;
+    var acc = me.account || findAccount_(me.email); if (!acc) return;
+    var cell = accSheet_().getRange(acc.row, 7); cell.setNumberFormat('@'); cell.setValue(nowStr_());
+    c.put(k, '1', 600);
+  } catch (e) {}
+}
+/* سجل الدخول: كل دخول جديد بالبريد والوقت والطريقة */
+function logLogin_(email, how) {
+  try {
+    var ss = master_(), sh = ss.getSheetByName('سجل الدخول');
+    if (!sh) { sh = ss.insertSheet('سجل الدخول'); sh.setRightToLeft(true); sh.getRange(1, 1, 1, 4).setValues([['الوقت', 'البريد', 'الاسم', 'طريقة الدخول']]).setFontWeight('bold'); sh.setFrozenRows(1); }
+    var acc = findAccount_(email);
+    sh.insertRowAfter(1); sh.getRange(2, 1, 1, 4).setNumberFormat('@').setValues([[nowStr_(), email, acc ? acc.name : '(لا حساب بعد)', how || '']]);
+    if (sh.getLastRow() > 2000) sh.deleteRows(2001, sh.getLastRow() - 2000);
+  } catch (e) {}
 }
 function findAccount_(email) { email = String(email || '').toLowerCase(); var all = readAccounts_(); for (var i = 0; i < all.length; i++) if (all[i].email === email) return all[i]; return null; }
 function auth_(token) {
@@ -148,14 +170,15 @@ function resume_(dev) {
   var raw = prop_('d_' + dev); if (!raw) return {ok: false, error: 'انتهى تسجيل هذا الجهاز، ادخل بالرمز مرة واحدة'};
   var d = JSON.parse(raw); if (d.exp < Date.now()) { PropertiesService.getScriptProperties().deleteProperty('d_' + dev); return {ok: false, error: 'انتهى تسجيل هذا الجهاز، ادخل بالرمز مرة واحدة'}; }
   d.exp = Date.now() + 180 * 864e5; PropertiesService.getScriptProperties().setProperty('d_' + dev, JSON.stringify(d));
-  return ok_({token: newSession_(d.email)});
+  return ok_({token: newSession_(d.email, 'البصمة / الجهاز المحفوظ')});
 }
-function newSession_(email) {
+function newSession_(email, how) {
   try { purgeSessions_(); } catch (e) {}
+  logLogin_(email, how);
   var token = Utilities.getUuid() + Utilities.getUuid().slice(0, 8);
   PropertiesService.getScriptProperties().setProperty('s_' + token, JSON.stringify({email: email, exp: Date.now() + CFG.SESSION_DAYS * 864e5}));
   var acc = findAccount_(email);
-  if (acc) accSheet_().getRange(acc.row, 7).setValue(Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'));
+  if (acc) { var cl = accSheet_().getRange(acc.row, 7); cl.setNumberFormat('@'); cl.setValue(nowStr_()); }
   return token;
 }
 function sendCode_(email, phone) {
@@ -174,6 +197,7 @@ function sendCode_(email, phone) {
   return ok_({sentTo: masked || maskEmail_(email)});
 }
 function verifyCode_(email, code, phone) {
+  var byPhone = !!(phone && !email);
   if (phone && !email) { var pa = findAccountByPhone_(phone); if (!pa) return {ok: false, error: 'هذا الرقم غير مسجّل'}; email = pa.email; }
   email = String(email || '').trim().toLowerCase();
   var c = CacheService.getScriptCache(), k = 'otp_' + email, raw = c.get(k);
@@ -182,7 +206,7 @@ function verifyCode_(email, code, phone) {
   if (o.tries >= 5) { c.remove(k); return {ok: false, error: 'محاولات كثيرة، اطلب رمزاً جديداً'}; }
   if (String(code).trim() !== o.code) { o.tries++; c.put(k, JSON.stringify(o), 600); return {ok: false, error: 'الرمز غير صحيح'}; }
   c.remove(k);
-  return ok_({token: newSession_(email)});
+  return ok_({token: newSession_(email, byPhone ? 'رمز (الدخول بالجوال)' : 'رمز البريد')});
 }
 function googleLogin_(cred) {
   var cid = prop_('GOOGLE_CLIENT_ID'); if (!cid || !cred) return {ok: false, error: 'الدخول بزر Google غير مفعّل'};
@@ -190,7 +214,7 @@ function googleLogin_(cred) {
   if (r.getResponseCode() !== 200) return {ok: false, error: 'تعذّر التحقق من حساب Google'};
   var t = JSON.parse(r.getContentText());
   if (t.aud !== cid || String(t.email_verified) !== 'true') return {ok: false, error: 'تعذّر التحقق من حساب Google'};
-  return ok_({token: newSession_(String(t.email).toLowerCase())});
+  return ok_({token: newSession_(String(t.email).toLowerCase(), 'Google')});
 }
 function claim_(me, p) {
   if (me.active) return ok_({});
@@ -203,8 +227,8 @@ function claim_(me, p) {
       var dbA = readDb_().db, tA = (dbA.teachers || {})[tidOf_(dbA, p.tname)] || {};
       auto = (tA.email && String(tA.email).toLowerCase() === me.email) || (tA.phone && phoneKey_(tA.phone) && phoneKey_(tA.phone) === phoneKey_(p.phone));
     }
-    var row = [me.email, p.name || canon_(p.tname) || '', role, canon_(p.tname) || '', auto ? 'مفعّل' : 'بانتظار الاعتماد', Utilities.formatDate(new Date(), 'Asia/Riyadh', 'yyyy-MM-dd HH:mm'), '', ''];
-    if (acc) sh.getRange(acc.row, 1, 1, 6).setValues([row.slice(0, 6)]); else sh.appendRow(row);
+    var row = [me.email, p.name || canon_(p.tname) || '', role, canon_(p.tname) || '', auto ? 'مفعّل' : 'بانتظار الاعتماد', nowStr_(), nowStr_(), auto ? 'تفعيل تلقائي: الجوال مطابق' : ''];
+    if (acc) sh.getRange(acc.row, 1, 1, 7).setNumberFormat('@').setValues([row.slice(0, 7)]); else { sh.appendRow(row); sh.getRange(sh.getLastRow(), 6, 1, 2).setNumberFormat('@').setValues([[row[5], row[6]]]); }
     if (p.phone) { var a2 = findAccount_(me.email); if (a2) sh.getRange(a2.row, 9).setValue(String(p.phone)); }
   } finally { lock.releaseLock(); }
   if (p.photo && p.tname) { try { var db0 = readDb_().db, tid0 = tidOf_(db0, p.tname); if (tid0) savePhoto_(tid0, p.photo, db0.teachers[tid0].name, me.email, 'self'); } catch (e) {} }
@@ -336,6 +360,7 @@ function tidOf_(db, name) {
 
 /* ================= BOOT ================= */
 function boot_(me, p) {
+  touch_(me);
   var store = readDb_(), db = store.db;
   var pub = {email: me.email, role: me.role, active: me.active, owner: me.owner, tname: me.tname, name: me.name, status: me.status};
   var files = allFiles_(db);
