@@ -14,6 +14,7 @@ var CFG = {
   EXAMS_FOLDER: '1C-MVkIDTd32gdyJGbXf0FK71tBbWvOpj', // «اختبارات الجمعية»
   EXAMS_BOOK: '1-9703iB9aw_fnOTk4J5M_MxIEDRetPJFtdW6xHGjkfk', // «رفع الطلاب للإختبارات 1448هـ — من منصة زمر النور»
   TATT_FOLDER: '1S_djz_jS8SpB7bA06oHTGaRiRlbzcnfl', // «تحضير المعلمين»
+  TATT_SHEET: '1exnbEmx-FPGYFgoQYF2vJF--4T0hBBxhdEvYnvpuogw', // «كشف متابعة جائزة المعلم المتميز» = ملف تحضير المعلمين
   REG_IDS: ['1TOwBiMn4rONMmGbzkQjzbqVuLSIteR2TbNuIK-pe8P8', '1NK8QPaf9WQaUSXA5bDzcl7m5ZLb3SJ5ISb-sokQZlTc'] // نماذج التسجيل 1448 ثم 1447
 };
 var ROLE_AR = {system:'النظام', admin:'الإدارة', exams:'لجنة الاختبارات', teacher:'معلم'};
@@ -63,6 +64,7 @@ function handle_(req) {
     if (a === 'roster') return roster_(me, p);
     if (a === 'contact') return contact_(me, p);
     if (a === 'examsSync') { if (me.role !== 'system' && me.role !== 'admin') return {ok: false, error: 'للإدارة فقط'}; return ok_({url: syncExamsBook_(readDb_().db)}); }
+    if (a === 'tattSync') return tattSync_(me);
     if (a === 'photos') return photos_(me);
     if (a === 'photo') return setPhoto_(me, p);
     if (a === 'importPhotos') return importPhotos_(me);
@@ -346,7 +348,7 @@ function boot_(me, p) {
   var tid = tidOf_(db, me.tname);
   var athAdmin = ((db.config || {}).athar || {}).admin_teacher_id;
   if (full) {
-    ['teachers', 'students', 'exams', 'athar', 'meetings', 'config', 'athar_log', 'tasmee', 'tatt', 'notices'].forEach(function (c) { data[c] = db[c] || {}; });
+    ['teachers', 'students', 'exams', 'athar', 'meetings', 'config', 'athar_log', 'tasmee', 'tatt', 'notices', 'nreads'].forEach(function (c) { data[c] = db[c] || {}; });
     data.files = {}; files.forEach(function (f) { data.files[f.id] = f; });
   } else {
     var mine = teacherFiles_(files, me.tname), myIds = mine.map(function (f) { return f.id; });
@@ -363,9 +365,10 @@ function boot_(me, p) {
     if (tid && tid === athAdmin) { data.athar = db.athar || {}; data.athar_log = db.athar_log || {}; }
     data.tasmee = {}; Object.keys(db.tasmee || {}).forEach(function (id) { if (myIds.indexOf(id.split('_')[0]) >= 0) data.tasmee[id] = db.tasmee[id]; });
     data.tatt = {}; Object.keys(db.tatt || {}).forEach(function (id) { if (tid && id.indexOf(tid + '_') === 0) data.tatt[id] = db.tatt[id]; });
-    data.config.perms = (db.config || {}).perms || {}; data.config.grants = (db.config || {}).grants || {}; data.config.exam = (db.config || {}).exam || {}; data.config.phrases = (db.config || {}).phrases || null;
+    data.config.perms = (db.config || {}).perms || {}; data.config.grants = (db.config || {}).grants || {}; data.config.exam = (db.config || {}).exam || {}; data.config.phrases = (db.config || {}).phrases || null; data.config.day = (db.config || {}).day || {};
     data.students = {}; if (me.role === 'exams' || hasGrant_(db, me.email, 'committee')) data.students = db.students || {};
-    data.notices = {}; Object.keys(db.notices || {}).forEach(function (id) { var n = db.notices[id]; if (n && (Date.now() - new Date(n.at).getTime()) < 21 * 864e5) data.notices[id] = n; });
+    data.notices = {}; Object.keys(db.notices || {}).forEach(function (id) { var n = db.notices[id]; if (n && (Date.now() - new Date(n.at).getTime()) < 21 * 864e5 && (!n.to || n.to === 'teachers' || n.to === 'all' || (tid && n.to === 't:' + tid))) data.notices[id] = n; });
+    data.nreads = {}; Object.keys(db.nreads || {}).forEach(function (id) { if (tid && id.slice(-(tid.length + 2)) === '__' + tid) data.nreads[id] = db.nreads[id]; });
   }
   var out = {me: pub, data: data, link: appUrl_(), serverTime: new Date().toISOString(), photosVer: (prop_('PHOTOS_VER') || '0') + ':' + Object.keys(db.photos || {}).map(function (k) { return k + (db.photos[k].file || '').slice(-4); }).join('')};
   if (me.role === 'system') out.accounts = readAccounts_();
@@ -388,6 +391,7 @@ function canWrite_(me, db, coll, id, op, data, cur) {
   if (r === 'admin') return true;
   var tid = tidOf_(db, me.tname), athAdmin = ((db.config || {}).athar || {}).admin_teacher_id;
   if (coll === 'tatt') return !!tid && id.indexOf(tid + '_') === 0 && op !== 'delete';
+  if (coll === 'nreads') return !!tid && op === 'set' && id.slice(-(tid.length + 2)) === '__' + tid;
   if (coll === 'athar_log') return !!tid && (id.indexOf(tid + '_') === 0 || tid === athAdmin);
   if (coll === 'meetings') return !!tid && tid === athAdmin && op === 'update';
   if (coll === 'athar') return !!tid && tid === athAdmin;
@@ -426,8 +430,9 @@ function write_(me, p) {
     (db[coll] = db[coll] || {}); if (doc) db[coll][id] = doc; else delete db[coll][id];
     try { report_(coll, db); } catch (e) {}
     if (coll === 'exams') { try { syncExamsBook_(db); } catch (e) {} }
-    if (coll === 'tatt') { try { syncTattBook_(db); } catch (e) {} }
-    return ok_({id: id, doc: doc});
+    var extra = {};
+    if (coll === 'tatt') { try { var dd = (doc || cur || {}); extra.file = tattPush_(db, dd.teacher_id || id.split('_')[0], dd.date || id.split('_')[1], doc ? doc.status : ''); } catch (e) { extra.file = 'error: ' + (e && e.message || e); } }
+    return ok_({id: id, doc: doc, file: extra.file});
   } finally { lock.releaseLock(); }
 }
 function tasmee_(me, p) {
@@ -611,6 +616,22 @@ function sendCommittee_(date) {
 function eveningDigest() {
   var tomorrow = addDays_(today_(), 1), w = dow_(tomorrow);
   if (w === 1 || w === 3) sendCommittee_(tomorrow);
+  try { sendAdminExamSummary_(today_()); } catch (e) {}
+}
+/** ملخص نتائج الاختبار الداخلي لليوم إلى الإدارة بالبريد */
+function sendAdminExamSummary_(date) {
+  var db = readDb_().db, pass = Number(((db.config || {}).exam || {}).pass) || 90;
+  var L = Object.keys(db.exams || {}).map(function (id) { return db.exams[id]; }).filter(function (e) { return e.kind === 'داخلي' && e.score != null && e.score !== '' && (e.date === date || String(e.done_at || '').slice(0, 10) === date); });
+  if (!L.length) return 0;
+  var ok = L.filter(function (e) { return e.passed != null ? e.passed : e.score >= pass; });
+  var to = readAccounts_().filter(function (a) { return (a.role === 'admin' || a.role === 'system') && a.status === 'مفعّل' && a.email; }).map(function (a) { return a.email; });
+  if (!to.length) return 0;
+  var row = function (e) { return '<li>' + esc_(e.student) + ' · ' + esc_(e.halaqa || '') + ' · الفرع ' + esc_(e.branch) + ' · <b>' + esc_(e.score) + '</b></li>'; };
+  var body = '<p>اختُبر اليوم <b>' + L.length + '</b> طالب: نجح <b>' + ok.length + '</b>، ويحتاج مراجعة <b>' + (L.length - ok.length) + '</b>.</p>' +
+    (ok.length ? '<p><b>الناجحون (جاهزون للرفع لاختبار الجمعية):</b></p><ul style="padding-right:18px">' + ok.map(row).join('') + '</ul>' : '') +
+    (L.length > ok.length ? '<p><b>يحتاجون مراجعة:</b></p><ul style="padding-right:18px">' + L.filter(function (e) { return ok.indexOf(e) < 0; }).map(row).join('') + '</ul>' : '');
+  MailApp.sendEmail({to: to.join(','), subject: 'ملخص الاختبار الداخلي اليوم · نجح ' + ok.length + ' من ' + L.length, name: CFG.APP, htmlBody: mail_('ملخص الاختبار الداخلي', body + btn_(appUrl_() + '#exams', 'فتح الاختبارات'))});
+  return to.length;
 }
 
 /* ================= SETUP (شغّلها مرة واحدة) ================= */
@@ -631,18 +652,20 @@ function importSeed_() {
 /* يُنشئ مشغّل التسخين تلقائياً مرة واحدة */
 function ensureTriggers_() {
   try {
-    var pr = PropertiesService.getScriptProperties(); if (pr.getProperty('TRIG_V2')) return;
+    var pr = PropertiesService.getScriptProperties(); if (pr.getProperty('TRIG_V3')) return;
     var lock = LockService.getScriptLock(); if (!lock.tryLock(1000)) return;
-    try { if (pr.getProperty('TRIG_V2')) return; installTriggersOnly_(); pr.setProperty('TRIG_V2', String(Date.now())); } finally { lock.releaseLock(); }
+    try { if (pr.getProperty('TRIG_V3')) return; installTriggersOnly_(); pr.setProperty('TRIG_V3', String(Date.now())); } finally { lock.releaseLock(); }
   } catch (e) {}
 }
 function installTriggersOnly_() {
-  ScriptApp.getProjectTriggers().forEach(function (t) { if (['warmGrids', 'eveningDigest'].indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t); });
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (['warmGrids', 'eveningDigest', 'weeklyArchive'].indexOf(t.getHandlerFunction()) >= 0) ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('warmGrids').timeBased().everyMinutes(5).create();
   ScriptApp.newTrigger('eveningDigest').timeBased().atHour(21).everyDays(1).inTimezone('Asia/Riyadh').create();
+  ScriptApp.newTrigger('weeklyArchive').timeBased().everyWeeks(1).onWeekDay(ScriptApp.WeekDay.THURSDAY).atHour(22).inTimezone('Asia/Riyadh').create();
 }
 /** تسخين ملفات التحضير كل 5 دقائق حتى يفتح التطبيق بسرعة */
 function warmGrids() {
+  try { tattImport_(false); } catch (e) {}
   try { var db = readDb_().db; Object.keys(db.files || {}).forEach(function (id) { var f = db.files[id]; readFile_({id: id, file_id: f.file_id, halaqa: f.halaqa, stage: f.stage, order: f.order, teachers: f.teachers, students: f.students, sheet: f.sheet, first_sunday: f.first_sunday}, true); }); } catch (e) {}
 }
 /** شغّلها مرة واحدة من المحرر: تُنشئ مشغّل التسخين ومشغّل كشف اللجنة */
@@ -827,39 +850,160 @@ function syncExamsBook_(db) {
 }
 
 
-/* ================= حضور المعلمين في الدرايف ================= */
-/* جدول جوجل في مجلد «تحضير المعلمين» يُعاد بناؤه بعد كل تسجيل حضور: المعلمون × أيام الدراسة */
-function tattBook_() {
-  var id = prop_('TATT_BOOK'), ss = null;
-  if (id) { try { ss = SpreadsheetApp.openById(id); } catch (e) { ss = null; } }
-  if (!ss) {
-    ss = SpreadsheetApp.create('حضور المعلمين اليومي 1448هـ — من منصة زمر النور');
-    try { var f = DriveApp.getFileById(ss.getId()); DriveApp.getFolderById(CFG.TATT_FOLDER).addFile(f); DriveApp.getRootFolder().removeFile(f); } catch (e) {}
-    PropertiesService.getScriptProperties().setProperty('TATT_BOOK', ss.getId());
-  }
-  return ss;
+/* ================= ملف تحضير المعلمين (المرجع) ================= */
+/* الملف الرسمي «كشف متابعة جائزة المعلم المتميز»: صف لكل معلم، وعمود لكل يوم (الأحد–الأربعاء).
+   المنصة تقرأ منه الأيام الماضية، وتكتب فيه كل تسجيل من المنصة في الخانة نفسها. */
+var TATT_FILE_MAP = {'حاضر': 'حاضر', 'متأخر': 'متأخر', 'غائب': 'غائب', 'معتذر': 'مستأذن'};
+var TATT_FROM_FILE = {'حاضر': 'حاضر', 'متأخر': 'متأخر', 'غائب': 'غائب', 'مستأذن': 'معتذر', 'معتذر': 'معتذر'};
+function tattClean_(n) { return String(n || '').replace(/^\s*(?:[أا]\s*\.|الأستاذ|الشيخ)\s*/, '').replace(/\s+/g, ' ').trim(); }
+function tattSheet_() {
+  var ss = SpreadsheetApp.openById(prop_('TATT_SHEET') || CFG.TATT_SHEET), shs = ss.getSheets(), sh = shs[0];
+  for (var i = 0; i < shs.length; i++) { var t = shs[i].getRange(1, 1, 2, 6).getDisplayValues().join(' '); if (/حضور المعلم/.test(t)) { sh = shs[i]; break; } }
+  return sh;
 }
-function syncTattBook_(db) {
-  var ss = tattBook_(), tt = db.tatt || {}, T = db.teachers || {};
-  var dates = {}; Object.keys(tt).forEach(function (k) { var x = tt[k]; if (x && x.date) dates[x.date] = 1; });
-  var days = Object.keys(dates).sort().reverse().slice(0, 45).reverse();
-  var ids = Object.keys(T).sort(function (a, b) { return (T[a].order || 99) - (T[b].order || 99) || String(T[a].name).localeCompare(String(T[b].name)); });
-  var AB = {'حاضر': 'ح', 'متأخر': 'م', 'غائب': 'غ', 'معتذر': 'ع'};
-  var head = ['المعلم', 'الحلقة'].concat(days.map(function (d) { return DAY_AR[new Date(d + 'T12:00:00+03:00').getDay()] + '\n' + hijriStr_(d).replace(/ ?1448 ?هـ?/, '') ; })).concat(['حاضر', 'متأخر', 'غائب', 'معتذر', 'نسبة الحضور']);
-  var rows = [head];
-  ids.forEach(function (id) {
-    var c = {'حاضر': 0, 'متأخر': 0, 'غائب': 0, 'معتذر': 0}, n = 0;
-    var cells = days.map(function (d) { var v = (tt[id + '_' + d] || {}).status || ''; if (c[v] != null) { c[v]++; n++; } return AB[v] || ''; });
-    if (!n) return;
-    rows.push(['أ. ' + (T[id].name || ''), T[id].halaqa || ''].concat(cells).concat([c['حاضر'], c['متأخر'], c['غائب'], c['معتذر'], n ? Math.round((c['حاضر'] + c['متأخر']) / n * 100) / 100 : '']));
+/** يقرأ هيكل الملف: صف التواريخ وأعمدتها، وصفوف المعلمين */
+function tattParse_(sh, db) {
+  var last = Math.min(sh.getLastRow(), 80), lc = sh.getLastColumn(), v = sh.getRange(1, 1, last, lc).getDisplayValues();
+  var hr = -1, cols = {}, order = [];
+  for (var r = 0; r < Math.min(v.length, 10) && hr < 0; r++) {
+    var found = 0, tmp = {};
+    for (var c = 0; c < v[r].length; c++) { var m = /(\d{1,2})\s*\/\s*(\d{1,2})\s*\/\s*(\d{4})/.exec(v[r][c]); if (m) { found++; tmp[m[3] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[1]).slice(-2)] = c + 1; } }
+    if (found >= 2) { hr = r; cols = tmp; }
+  }
+  if (hr < 0) throw new Error('لم أجد صف التواريخ في ملف تحضير المعلمين');
+  order = Object.keys(cols).sort();
+  var rows = {}, names = [], unmatched = [];
+  for (var r2 = hr + 1; r2 < v.length; r2++) {
+    var nm = tattClean_(v[r2][1]); if (!nm) break; if (/البند|اسم المعلم/.test(nm)) break;
+    var tid = tidOf_(db, nm); names.push(nm);
+    if (tid) rows[tid] = {row: r2 + 1, name: nm, vals: v[r2]}; else unmatched.push(nm);
+  }
+  return {sh: sh, hr: hr + 1, cols: cols, dates: order, rows: rows, unmatched: unmatched, lastCol: lc, v: v};
+}
+/** يضيف أسبوعاً جديداً (فاصل + 4 أيام) بعد آخر أسبوع، بنفس التنسيق والقوائم */
+function tattAddWeek_(P) {
+  var sh = P.sh, lastD = P.dates[P.dates.length - 1], lastC = P.cols[lastD];
+  var sun = addDays_(lastD, (7 - dow_(lastD)) % 7 || 7);
+  sh.insertColumnsAfter(lastC, 5);
+  var src = sh.getRange(1, lastC - 4, sh.getMaxRows(), 5), dst = sh.getRange(1, lastC + 1, sh.getMaxRows(), 5);
+  src.copyTo(dst, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+  src.copyTo(dst, SpreadsheetApp.CopyPasteType.PASTE_DATA_VALIDATION, false);
+  for (var i = 0; i < 4; i++) {
+    var d = addDays_(sun, i), p = d.split('-');
+    sh.getRange(P.hr, lastC + 2 + i).setValue(DAY_AR[dow_(d)] + '\n' + p[2] + '/ ' + p[1] + '/ ' + p[0]);
+  }
+  var wk = ['الأول', 'الثاني', 'الثالث', 'الرابع', 'الخامس', 'السادس', 'السابع', 'الثامن', 'التاسع', 'العاشر', 'الحادي عشر', 'الثاني عشر', 'الثالث عشر', 'الرابع عشر', 'الخامس عشر'];
+  try { sh.getRange(P.hr - 1, lastC + 2).setValue('الأسبوع ' + (wk[P.dates.length / 4] || String(P.dates.length / 4 + 1))); } catch (e) {}
+  var data = sh.getRange(P.hr + 1, lastC + 1, Object.keys(P.rows).length + P.unmatched.length + 2, 5); data.clearContent();
+}
+/** يكتب حالة معلم ليوم في الملف. يرجع 'ok' أو سبب عدم الكتابة */
+function tattPush_(db, tid, date, status) {
+  if (dow_(date) > 3) return 'not_day';
+  var sh = tattSheet_(), P = tattParse_(sh, db);
+  var R = P.rows[tid]; if (!R) return 'no_teacher';
+  var guard = 0;
+  while (!P.cols[date] && date > P.dates[P.dates.length - 1] && guard++ < 3) { tattAddWeek_(P); SpreadsheetApp.flush(); P = tattParse_(sh, db); R = P.rows[tid]; }
+  var c = P.cols[date]; if (!c) return 'no_date';
+  sh.getRange(R.row, c).setValue(status ? (TATT_FILE_MAP[status] || status) : '');
+  CacheService.getScriptCache().remove('tatt_imp');
+  return 'ok';
+}
+/** يقرأ الملف ويحدّث المنصة (الملف هو المرجع). ويكمل في الملف ما سُجّل في المنصة ولم يُكتب فيه */
+function tattImport_(force) {
+  var cache = CacheService.getScriptCache();
+  if (!force && cache.get('tatt_imp')) return {skipped: true};
+  var store = readDb_(), db = store.db, tt = db.tatt || {}, P = tattParse_(tattSheet_(), db);
+  var up = [], pushed = 0, t = today_(), stamp = new Date().toISOString();
+  Object.keys(P.rows).forEach(function (tid) {
+    var R = P.rows[tid];
+    P.dates.forEach(function (d) {
+      if (d > t) return;
+      var raw = String(R.vals[P.cols[d] - 1] || '').trim(), fv = TATT_FROM_FILE[raw] || '', id = tid + '_' + d, cur = tt[id] || {};
+      if (fv && fv !== cur.status) up.push([id, {teacher_id: tid, date: d, status: fv, by: 'ملف تحضير المعلمين', at: stamp, src: 'file'}]);
+      else if (!fv && cur.status && cur.src !== 'file') { try { P.sh.getRange(R.row, P.cols[d]).setValue(TATT_FILE_MAP[cur.status] || cur.status); pushed++; } catch (e) {} }
+      else if (!fv && cur.status && cur.src === 'file') up.push([id, null]); // مُسح من الملف
+    });
   });
-  var sh = ss.getSheetByName('حضور المعلمين') || ss.insertSheet('حضور المعلمين', 0); sh.clear();
-  sh.getRange(1, 1, rows.length, head.length).setValues(rows); styleTab_(sh, 1, head.length);
-  if (rows.length > 1) sh.getRange(2, head.length, rows.length - 1, 1).setNumberFormat('0%');
-  sh.setFrozenColumns(2);
-  var log = [['التاريخ', 'الهجري', 'المعلم', 'الحالة', 'سجّله', 'وقت التسجيل']].concat(Object.keys(tt).map(function (k) { return tt[k]; }).filter(function (x) { return x && x.status; }).sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); }).map(function (x) { return [x.date, hijriStr_(x.date), 'أ. ' + ((T[x.teacher_id] || {}).name || x.teacher_id), x.status, x.by || '', x.at || '']; }));
-  var sh2 = ss.getSheetByName('السجل') || ss.insertSheet('السجل'); sh2.clear();
-  sh2.getRange(1, 1, log.length, 6).setValues(log); styleTab_(sh2, 1, 6);
-  var def = ss.getSheetByName('Sheet1') || ss.getSheetByName('الورقة1'); if (def && ss.getSheets().length > 1) ss.deleteSheet(def);
-  return ss.getUrl();
+  if (up.length) {
+    var lock = LockService.getScriptLock(); lock.waitLock(25000);
+    try {
+      store = readDb_(); var sh = store.sh, add = [];
+      up.forEach(function (u) { var row = store.idx['tatt|' + u[0]];
+        if (!u[1]) { if (row) sh.getRange(row, 1, 1, 5).clearContent(); return; }
+        if (row) sh.getRange(row, 3, 1, 3).setValues([[JSON.stringify(u[1]), stamp, 'ملف تحضير المعلمين']]);
+        else add.push(['tatt', u[0], JSON.stringify(u[1]), stamp, 'ملف تحضير المعلمين']); });
+      if (add.length) sh.getRange(sh.getLastRow() + 1, 1, add.length, 5).setValues(add);
+      SpreadsheetApp.flush();
+    } finally { lock.releaseLock(); }
+  }
+  cache.put('tatt_imp', '1', 240);
+  return {updated: up.length, pushed: pushed, teachers: Object.keys(P.rows).length, unmatched: P.unmatched, from: P.dates[0], to: P.dates[P.dates.length - 1], url: P.sh.getParent().getUrl()};
+}
+function tattSync_(me) {
+  if (me.role !== 'system' && me.role !== 'admin') return {ok: false, error: 'للإدارة فقط'};
+  return ok_(tattImport_(true));
+}
+
+/* ================= مجلد «ملفات المنصة» والأرشيف ================= */
+var ORG = {
+  ROOT: '1NM40lK5k0rTzNgnzgXOGopGF-Nh8D0SA', // General - جامع اليحيى
+  ATHAR_XLSX: '1NzG9qZVtmal-Prmcx62qnHwI3f5oZLDD',
+  STAFF_FILE: '1oU0g-wu1g0Zw-hlNjzWuAOD9jzJ04W5PD_fxquL7pNc',
+  SUBS: ['01 قاعدة البيانات', '02 التقارير والاختبارات', '03 تحضير الحلقات', '04 المعلمين', '05 التسجيل', '06 الأرشيف']
+};
+function subFolder_(parent, name) { var it = parent.getFoldersByName(name); return it.hasNext() ? it.next() : parent.createFolder(name); }
+function platformFolder_() {
+  var id = prop_('PLATFORM_FOLDER');
+  if (id) { try { var f = DriveApp.getFolderById(id); if (!f.isTrashed()) return f; } catch (e) {} }
+  var f2 = subFolder_(DriveApp.getFolderById(ORG.ROOT), 'ملفات المنصة');
+  PropertiesService.getScriptProperties().setProperty('PLATFORM_FOLDER', f2.getId());
+  return f2;
+}
+function shortcut_(folder, targetId, name) {
+  var it = folder.getFilesByName(name); if (it.hasNext()) return 'موجود: ' + name;
+  try { folder.createShortcut(targetId).setName(name); return 'اختصار: ' + name; } catch (e) { return 'تعذّر: ' + name + ' (' + e.message + ')'; }
+}
+function moveFile_(id, folder, name) {
+  try { var f = DriveApp.getFileById(id); f.moveTo(folder); if (name) f.setName(name); return 'نُقل: ' + (name || f.getName()); } catch (e) { return 'تعذّر نقل ' + id + ' (' + e.message + ')'; }
+}
+/** ربط حلقة الكبار والموظفين بالمنصة (الحلقة 13) */
+function linkStaffHalaqa_() {
+  var db = readDb_().db, files = db.files || {};
+  if (Object.keys(files).some(function (k) { return files[k].file_id === ORG.STAFF_FILE; })) return 'حلقة الموظفين مربوطة مسبقاً';
+  var ref = files.f01 || files[Object.keys(files)[0]] || {};
+  setDoc_('files', 'f13', {file_id: ORG.STAFF_FILE, halaqa: 'حلقة الكبار والموظفين', stage: 'الموظفين', order: 13, teachers: ['وهيب البيتي'], students: [], sheet: ref.sheet || 'جمادى الأولى-جمادى الآخرة 1448', first_sunday: ref.first_sunday || '2026-10-25'}, 'النظام');
+  return 'رُبطت حلقة الكبار والموظفين';
+}
+/** شغّلها مرة واحدة من المحرر: تنشئ «ملفات المنصة» وتنقل ملفات المنصة وتضع اختصارات لبقية الملفات */
+function organizePlatformFiles() {
+  var log = [], top = platformFolder_(), sub = {};
+  ORG.SUBS.forEach(function (n) { sub[n] = subFolder_(top, n); });
+  log.push(moveFile_(CFG.MASTER_ID, sub['01 قاعدة البيانات'], '01 قاعدة بيانات المنصة (لا تُعدَّل يدوياً)'));
+  log.push(moveFile_(CFG.REPORT_ID, sub['02 التقارير والاختبارات'], '02 تقارير الحلقات والإحصاءات 1448هـ'));
+  log.push(moveFile_(prop_('EXAMS_BOOK') || CFG.EXAMS_BOOK, sub['02 التقارير والاختبارات'], '03 ملف الاختبارات 1448هـ'));
+  try { photoFolder_().moveTo(sub['04 المعلمين']); log.push('نُقل: مجلد صور المعلمين'); } catch (e) { log.push('تعذّر نقل صور المعلمين: ' + e.message); }
+  log.push(linkStaffHalaqa_());
+  var db = readDb_().db, fs = db.files || {};
+  Object.keys(fs).map(function (k) { return fs[k]; }).sort(function (a, b) { return (a.order || 99) - (b.order || 99); }).forEach(function (f) {
+    log.push(shortcut_(sub['03 تحضير الحلقات'], f.file_id, ('0' + (f.order || 0)).slice(-2) + ' تحضير ' + f.halaqa));
+  });
+  log.push(shortcut_(sub['04 المعلمين'], CFG.TATT_SHEET, 'ملف تحضير المعلمين'));
+  log.push(shortcut_(sub['04 المعلمين'], ORG.ATHAR_XLSX, 'برنامج أثر · كشف متابعة المربي'));
+  log.push(shortcut_(sub['04 المعلمين'], CFG.TEACHER_FILES_FOLDER, 'صور وملفات المعلمين (الأصل)'));
+  log.push(shortcut_(sub['05 التسجيل'], CFG.REG_IDS[0], 'نموذج التسجيل 1448هـ (الردود)'));
+  log.push(shortcut_(sub['05 التسجيل'], CFG.REG_IDS[1], 'نموذج التسجيل 1447هـ (احتياطي)'));
+  log.push(weeklyArchive());
+  installTriggersOnly_(); PropertiesService.getScriptProperties().setProperty('TRIG_V3', String(Date.now()));
+  Logger.log(log.join('\n'));
+  return log;
+}
+/** نسخة أسبوعية من قاعدة البيانات في «06 الأرشيف» (يُحتفظ بآخر 12 نسخة) */
+function weeklyArchive() {
+  var folder = subFolder_(platformFolder_(), '06 الأرشيف'), day = today_();
+  var name = 'نسخة قاعدة البيانات ' + day;
+  if (folder.getFilesByName(name).hasNext()) return 'نسخة اليوم موجودة';
+  DriveApp.getFileById(CFG.MASTER_ID).makeCopy(name, folder);
+  var all = [], it = folder.getFiles(); while (it.hasNext()) { var f = it.next(); if (/^نسخة قاعدة البيانات/.test(f.getName())) all.push(f); }
+  all.sort(function (a, b) { return b.getDateCreated() - a.getDateCreated(); }).slice(12).forEach(function (f) { f.setTrashed(true); });
+  return 'أرشيف: ' + name;
 }
