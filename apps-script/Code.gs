@@ -348,12 +348,15 @@ function boot_(me, p) {
   var tid = tidOf_(db, me.tname);
   var athAdmin = ((db.config || {}).athar || {}).admin_teacher_id;
   if (full) {
-    ['teachers', 'students', 'exams', 'athar', 'meetings', 'config', 'athar_log', 'tasmee', 'tatt', 'notices', 'nreads'].forEach(function (c) { data[c] = db[c] || {}; });
+    ['teachers', 'students', 'exams', 'athar', 'meetings', 'config', 'athar_log', 'tasmee', 'tatt', 'notices', 'nreads', 'comp'].forEach(function (c) { data[c] = db[c] || {}; });
     data.files = {}; files.forEach(function (f) { data.files[f.id] = f; });
   } else {
     var mine = teacherFiles_(files, me.tname), myIds = mine.map(function (f) { return f.id; });
     var committee = me.role === 'exams' || hasGrant_(db, me.email, 'committee');
     data.files = {}; (committee ? files : mine).forEach(function (f) { data.files[f.id] = f; });
+    var cfs = compMember_(db, me) ? compFiles_(db, files) : [], cids = cfs.map(function (f) { return f.id; });
+    cfs.forEach(function (f) { data.files[f.id] = f; });
+    data.comp = {}; Object.keys(db.comp || {}).forEach(function (id) { if (cids.indexOf(id.split('_')[0]) >= 0) data.comp[id] = db.comp[id]; });
     data.teachers = {}; Object.keys(db.teachers || {}).forEach(function (id) { var t = db.teachers[id]; data.teachers[id] = {name: t.name, aliases: t.aliases || [], order: t.order}; });
     data.meetings = db.meetings || {}; data.config = {athar: (db.config || {}).athar || {}, targets: (db.config || {}).targets || {}};
     data.exams = {};
@@ -365,7 +368,7 @@ function boot_(me, p) {
     if (tid && tid === athAdmin) { data.athar = db.athar || {}; data.athar_log = db.athar_log || {}; }
     data.tasmee = {}; Object.keys(db.tasmee || {}).forEach(function (id) { if (myIds.indexOf(id.split('_')[0]) >= 0) data.tasmee[id] = db.tasmee[id]; });
     data.tatt = {}; Object.keys(db.tatt || {}).forEach(function (id) { if (tid && id.indexOf(tid + '_') === 0) data.tatt[id] = db.tatt[id]; });
-    data.config.perms = (db.config || {}).perms || {}; data.config.grants = (db.config || {}).grants || {}; data.config.exam = (db.config || {}).exam || {}; data.config.phrases = (db.config || {}).phrases || null; data.config.day = (db.config || {}).day || {};
+    data.config.perms = (db.config || {}).perms || {}; data.config.grants = (db.config || {}).grants || {}; data.config.exam = (db.config || {}).exam || {}; data.config.phrases = (db.config || {}).phrases || null; data.config.day = (db.config || {}).day || {}; data.config.comp = (db.config || {}).comp || null;
     data.students = {}; if (me.role === 'exams' || hasGrant_(db, me.email, 'committee')) data.students = db.students || {};
     data.notices = {}; Object.keys(db.notices || {}).forEach(function (id) { var n = db.notices[id]; if (n && (Date.now() - new Date(n.at).getTime()) < 21 * 864e5 && (!n.to || n.to === 'teachers' || n.to === 'all' || (tid && n.to === 't:' + tid))) data.notices[id] = n; });
     data.nreads = {}; Object.keys(db.nreads || {}).forEach(function (id) { if (tid && id.slice(-(tid.length + 2)) === '__' + tid) data.nreads[id] = db.nreads[id]; });
@@ -391,6 +394,7 @@ function canWrite_(me, db, coll, id, op, data, cur) {
   if (r === 'admin') return true;
   var tid = tidOf_(db, me.tname), athAdmin = ((db.config || {}).athar || {}).admin_teacher_id;
   if (coll === 'tatt') return !!tid && id.indexOf(tid + '_') === 0 && op !== 'delete';
+  if (coll === 'comp') return compMember_(db, me) && compFiles_(db).some(function (f) { return f.id === String(id).split('_')[0]; });
   if (coll === 'nreads') return !!tid && op === 'set' && id.slice(-(tid.length + 2)) === '__' + tid;
   if (coll === 'athar_log') return !!tid && (id.indexOf(tid + '_') === 0 || tid === athAdmin);
   if (coll === 'meetings') return !!tid && tid === athAdmin && op === 'update';
@@ -1006,4 +1010,28 @@ function weeklyArchive() {
   var all = [], it = folder.getFiles(); while (it.hasNext()) { var f = it.next(); if (/^نسخة قاعدة البيانات/.test(f.getName())) all.push(f); }
   all.sort(function (a, b) { return b.getDateCreated() - a.getDateCreated(); }).slice(12).forEach(function (f) { f.setTrashed(true); });
   return 'أرشيف: ' + name;
+}
+
+
+/* ================= المسابقة القرآنية ================= */
+var COMP_TEACHERS = ['أبوبكر بامجبور', 'حسن كمال', 'عبدالرحمن بخاري', 'خالد ديان'];
+function compCfg_(db) { var c = (db.config || {}).comp || {}; return {stages: c.stages || ['العليا'], teachers: c.teachers || COMP_TEACHERS}; }
+function compFiles_(db, files) { var st = compCfg_(db).stages; return (files || allFiles_(db)).filter(function (f) { return st.indexOf(f.stage) >= 0; }); }
+function compMember_(db, me) {
+  if (me.role === 'system' || me.role === 'admin') return true;
+  if (!me.tname) return false;
+  var n = norm_(canon_(me.tname)), tk = tokens_(canon_(me.tname));
+  if (compCfg_(db).teachers.some(function (t) { var k = tokens_(canon_(t)); return norm_(canon_(t)) === n || (k[0] === tk[0] && k[k.length - 1] === tk[tk.length - 1]); })) return true;
+  return teacherFiles_(compFiles_(db), me.tname).length > 0;
+}
+
+/** تعديلات 10 نوفمبر: جوال أ. زكريا، وإضافة أ. باسل اليغنم لحلقة أولى متوسط */
+function fixV15() {
+  var db = readDb_().db, out = [];
+  var z = (db.teachers || {}).t05; if (z && z.name === 'زكريا حسين') { z.phone = '0568334707'; setDoc_('teachers', 't05', z, 'النظام'); out.push('جوال زكريا حسين ← 0568334707'); }
+  var has = Object.keys(db.teachers || {}).some(function (k) { return norm_(db.teachers[k].name) === norm_('باسل اليغنم'); });
+  if (!has) { setDoc_('teachers', 't30', {card_baraka: '', card_baraka_exp: '', card_ilm: '', card_ilm_exp: '', classification: '', group: 'أولى متوسط', halaqa: 'عبدالله بن عباس', name: 'باسل اليغنم', notes: '', order: 24.5, phone: '', role: 'معلم مساعد', stage: 'المتوسطة', email: '', assoc_no: ''}, 'النظام'); out.push('أُضيف باسل اليغنم'); }
+  var f = (db.files || {}).f07; if (f && (f.teachers || []).indexOf('باسل اليغنم') < 0) { f.teachers = (f.teachers || []).concat(['باسل اليغنم']); setDoc_('files', 'f07', f, 'النظام'); out.push('باسل اليغنم في حلقة أولى متوسط'); }
+  try { CacheService.getScriptCache().remove('tatt_imp'); out.push(JSON.stringify(tattImport_(true))); } catch (e) { out.push('tatt: ' + e.message); }
+  Logger.log(out.join('\n')); return out;
 }
